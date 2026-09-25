@@ -3,9 +3,23 @@ assets:                      # each gets its own strategy, paper account and ref
   - "SOL/USDT"
   - "ETH/USDT"
   - "DOGE/USDT"
+  - "XRP/USDT"
+  - "BNB/USDT"
+  - "LINK/USDT"
+  - "AVAX/USDT"
+  - "ADA/USDT"
+  - "SUI/USDT"
+  - "LTC/USDT"
+  - "PAXG/USDT"
   - "SPY"                    # stocks/ETFs: bare ticker, real fills in the Alpaca paper account
   - "QQQ"
-stock_equity_per_asset: 500  # virtual account per stock; together within the $1,000 Alpaca balance
+  - "GLD"
+  - "TLT"
+  - "USO"
+stock_equity_per_asset: 200  # virtual account per stock; together within the $1,000 Alpaca balance
+stock_equity_overrides:      # accounts opened under the earlier $500 default
+  SPY: 500
+  QQQ: 500
 target_return_30d: 0.05      # success
 max_drawdown:      0.08      # failure
 min_sharpe:        1.2       # quality bar

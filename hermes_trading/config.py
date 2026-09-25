@@ -83,6 +83,10 @@ def is_stock(asset: str) -> bool:
 def start_equity(asset: str, goal: dict) -> float:
     """Each asset's virtual paper account. Stocks share the real Alpaca paper balance."""
     if is_stock(asset):
+        # Per-ticker overrides keep accounts opened under an older default measured correctly
+        overrides = goal.get("stock_equity_overrides") or {}
+        if asset in overrides:
+            return float(overrides[asset])
         return float(goal.get("stock_equity_per_asset", DEFAULT_STOCK_EQUITY))
     return CRYPTO_START_EQUITY
 
