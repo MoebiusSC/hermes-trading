@@ -71,6 +71,13 @@ button[disabled] { opacity: .6; cursor: default; }
 .tile .delta { font-size: 13px; margin-top: 2px; }
 .up { color: var(--delta-up); } .down { color: var(--delta-down); }
 .section { margin-top: 12px; }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.split > * { min-width: 0; }
+.kpis { display: flex; flex-wrap: wrap; gap: 4px 28px; margin: 6px 0 10px; }
+.kpis .label { color: var(--text-secondary); font-size: 12px; }
+.kpis .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpis .note { color: var(--text-muted); font-size: 12px; }
+.legend .perf { font-variant-numeric: tabular-nums; margin-left: 4px; }
 .chart-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
 .chart-head .spacer { flex: 1; }
 .chart-head button { padding: 3px 10px; font-size: 13px; }
@@ -107,7 +114,7 @@ button[disabled] { opacity: .6; cursor: default; }
 .detail > .stack { display: grid; gap: 12px; align-content: start; }
 .grid-tiles > *, .cards > *, .detail > *, .stack > * { min-width: 0; }
 @media (max-width: 860px) {
-  .detail { grid-template-columns: 1fr; }
+  .detail, .split { grid-template-columns: 1fr; }
   .grid-tiles { grid-template-columns: 1fr 1fr; }
   .tile.hero { grid-column: 1 / -1; }
   .tile.hero .value { font-size: 40px; }
@@ -146,19 +153,36 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
   <div id="content" hidden>
     <div class="grid-tiles" id="tiles"></div>
 
-    <section class="panel section">
-      <div class="chart-head">
-        <div>
-          <h2>Return by asset</h2>
-          <div class="sub">Realized paper return since each asset's first trade, as % of its own paper account (crypto $10,000 · stocks $500)</div>
+    <div class="split">
+      <section class="panel">
+        <div class="chart-head">
+          <div>
+            <h2>Crypto · return by asset</h2>
+            <div class="sub" id="crypto-sub">Realized paper return since each asset's first trade, as % of its own paper account</div>
+          </div>
+          <span class="spacer"></span>
+          <button type="button" data-table="crypto">Table</button>
         </div>
-        <span class="spacer"></span>
-        <button type="button" data-table="returns">Table</button>
-      </div>
-      <div class="legend" id="returns-legend"></div>
-      <div class="chart" id="returns-chart"></div>
-      <div class="table-wrap" id="returns-table" hidden></div>
-    </section>
+        <div class="kpis" id="crypto-kpis"></div>
+        <div class="legend" id="crypto-legend"></div>
+        <div class="chart" id="crypto-chart"></div>
+        <div class="table-wrap" id="crypto-table" hidden></div>
+      </section>
+      <section class="panel">
+        <div class="chart-head">
+          <div>
+            <h2>ETFs · return by asset</h2>
+            <div class="sub" id="stock-sub">Realized paper return since each asset's first trade, as % of its own paper account</div>
+          </div>
+          <span class="spacer"></span>
+          <button type="button" data-table="stock">Table</button>
+        </div>
+        <div class="kpis" id="stock-kpis"></div>
+        <div class="legend" id="stock-legend"></div>
+        <div class="chart" id="stock-chart"></div>
+        <div class="table-wrap" id="stock-table" hidden></div>
+      </section>
+    </div>
 
     <section class="section">
       <div class="cards" id="cards" role="group" aria-label="Select an asset"></div>
@@ -210,7 +234,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 let state = null;
 let candles = {};
 let selected = null;
-const tableOpen = { returns: false, price: false };
+const tableOpen = { crypto: false, stock: false, price: false };
 
 // ---------- formatting ----------
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -243,8 +267,12 @@ function svg(tag, attrs = {}) {
   for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
   return n;
 }
+const isStock = (asset) => !asset.includes("/");
+// Hues are assigned in goal order within each category, so each chart starts from series 1.
+// Past the sixth asset of a category, lines fall back to muted ink; the legend, end labels
+// and tooltip still name them.
 const colorFor = (asset) => {
-  const i = state.goal.assets.indexOf(asset);
+  const i = state.goal.assets.filter((a) => isStock(a) === isStock(asset)).indexOf(asset);
   return css(SERIES_VARS[i] || "--text-muted");
 };
 
@@ -513,32 +541,65 @@ function renderTiles() {
   );
 }
 
-function returnSeries() {
-  return state.assets.map((a) => {
+function returnSeries(assets) {
+  return assets.map((a) => {
     const t = a.trades;
     const points = t.length ? [[Date.parse(t[0].opened_at), 0], ...t.map((x) => [Date.parse(x.closed_at), (x.equity_after / a.start_equity - 1) * 100])] : [];
     return { name: a.asset.split("/")[0], asset: a.asset, color: colorFor(a.asset), points };
   });
 }
 
-function renderReturns() {
-  const series = returnSeries();
-  const legend = document.getElementById("returns-legend");
-  legend.replaceChildren(...series.map((s) => {
+function renderReturns(kind) {
+  const assets = state.assets.filter((a) => a.kind === kind);
+  const series = returnSeries(assets);
+  const accounts = [...new Set(assets.map((a) => a.start_equity))].sort((x, y) => x - y).map((v) => usd(v, 0)).join(" / ");
+  document.getElementById(kind + "-sub").textContent =
+    `Realized paper return since each asset's first trade, as % of its own paper account (${accounts})`;
+  // category totals: realized return on the combined accounts, and the most recent exit
+  const start = assets.reduce((s, a) => s + a.start_equity, 0);
+  const realized = assets.reduce((s, a) => s + a.paper.equity, 0) - start;
+  const last = assets.flatMap((a) => a.trades.map((t) => ({ a, t })))
+    .sort((x, y) => Date.parse(y.t.closed_at) - Date.parse(x.t.closed_at))[0];
+  const signCls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
+  const kpi = (label, v, note) => {
+    const box = el("div");
+    box.append(el("div", { class: "label" }, label),
+      el("div", { class: "value " + (v == null ? "" : signCls(v)) }, v == null ? "—" : pct(v, 3)),
+      el("div", { class: "note" }, note));
+    return box;
+  };
+  document.getElementById(kind + "-kpis").replaceChildren(
+    kpi("Historical return", start ? (realized / start) * 100 : 0, `${signedUsd(realized)} on ${usd(start, 0)} · ${assets.reduce((s, a) => s + a.trades.length, 0)} closed trades`),
+    kpi("Last trade", last ? last.t.pnl_pct * 100 : null,
+      last ? `${last.a.asset.split("/")[0]} · ${signedUsd(last.t.pnl)} · ${dateTimeFmt(Date.parse(last.t.closed_at))}` : "No closed trades yet"),
+  );
+  const legend = document.getElementById(kind + "-legend");
+  legend.replaceChildren(...series.map((s, i) => {
+    const a = assets[i], t = a.trades[a.trades.length - 1];
     const item = el("span");
     const key = el("span", { class: "key" }); key.style.background = s.color;
-    item.append(key, document.createTextNode(s.points.length ? s.name : `${s.name} · no closed trades yet`));
+    item.append(key, document.createTextNode(s.name));
+    if (t) {
+      const hist = (a.paper.equity / a.start_equity - 1) * 100;
+      const perf = el("span", { class: "perf" });
+      perf.append(el("span", { class: signCls(hist) }, pct(hist)), document.createTextNode(" · last "),
+        el("span", { class: signCls(t.pnl_pct) }, pct(t.pnl_pct * 100)));
+      item.append(perf);
+    } else {
+      item.append(document.createTextNode(" · no trades yet"));
+    }
     return item;
   }));
-  lineChart(document.getElementById("returns-chart"), {
-    series, step: true, xMax: Date.now(), height: 220, endLabels: true, label: "Realized return by asset",
+  lineChart(document.getElementById(kind + "-chart"), {
+    series, step: true, xMax: Date.now(), height: 240, endLabels: true,
+    label: `Realized return by asset, ${kind === "crypto" ? "crypto" : "ETFs"}`,
     yFmt: (v, step) => pct(v, Math.max(2, decimalsFor(step))),
     emptyText: "No closed trades yet — the chart starts at the first exit.",
   });
-  const rows = state.assets.flatMap((a) => a.trades.map((t) => [a.asset, dateTimeFmt(Date.parse(t.closed_at)),
+  const rows = assets.flatMap((a) => a.trades.map((t) => [a.asset, dateTimeFmt(Date.parse(t.closed_at)),
     { text: pct(t.pnl_pct * 100, 3), cls: t.pnl >= 0 ? "up" : "down" }, usd(t.equity_after), pct((t.equity_after / a.start_equity - 1) * 100, 3)]))
     .sort((a, b) => (a[1] < b[1] ? 1 : -1));
-  table(document.getElementById("returns-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
+  table(document.getElementById(kind + "-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
 }
 
 function renderCards() {
@@ -660,8 +721,9 @@ function render() {
   if (!state || !state.ready) return;
   if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];
   document.getElementById("content").hidden = false;
-  renderHeader(); renderTiles(); renderReturns(); renderCards(); renderDetail();
-  document.getElementById("returns-table").hidden = !tableOpen.returns;
+  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderCards(); renderDetail();
+  document.getElementById("crypto-table").hidden = !tableOpen.crypto;
+  document.getElementById("stock-table").hidden = !tableOpen.stock;
   document.getElementById("price-table").hidden = !tableOpen.price;
 }
 

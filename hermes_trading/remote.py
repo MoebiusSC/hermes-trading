@@ -33,6 +33,8 @@ from .storage import load_yaml
 REMOTE_DIR = config.ROOT / "remote_state"
 ROOT_FILES = ("goal.yaml", "strategy.template.yaml", "heartbeat.json")
 ASSET_FILES = ("strategy.yaml", "trades.jsonl", "hypotheses.jsonl", "paper_account.json")
+# CLI failures worth retrying: dropped or reset connections to Railway's API
+TRANSIENT_ERRORS = ("connection error", "error sending request", "os error 10054", "connection reset", "timed out")
 
 
 def railway_cmd() -> list[str]:
@@ -52,9 +54,10 @@ def _volume_files(*args: str) -> str:
     volume = config.env("RAILWAY_VOLUME", "hermes-trading-volume")
     cmd = [*railway_cmd(), "volume", "files", "--volume", volume, *args]
     # Railway's API drops connections now and then; retry those instead of failing the whole sync
-    for attempt in range(4):
+    for attempt in range(6):  # backoff totals ~30s, enough to ride out a DNS or Wi-Fi blip
         proc = subprocess.run(cmd, cwd=config.ROOT, capture_output=True, text=True, encoding="utf-8")
-        if proc.returncode == 0 or "connection error" not in (proc.stderr or proc.stdout):
+        output = (proc.stderr or proc.stdout).lower()
+        if proc.returncode == 0 or not any(m in output for m in TRANSIENT_ERRORS):
             break
         time.sleep(2 ** attempt)
     if proc.returncode != 0:
@@ -86,7 +89,7 @@ def pull(dest: Path = REMOTE_DIR) -> None:
     staging.mkdir(parents=True)
     root = {e["name"] for e in _list("/") if e["type"] == "file"}
     for name in ROOT_FILES:
-        if name in root:
+        if name in root and name != "heartbeat.json":
             _download(f"/{name}", staging / name)
     for asset_dir in (e["name"] for e in _list("/assets") if e["type"] == "directory"):
         base = f"/assets/{asset_dir}"
@@ -99,6 +102,9 @@ def pull(dest: Path = REMOTE_DIR) -> None:
         for entry in _list(f"{base}/history"):
             if entry["type"] == "file":
                 _download(f"{base}/history/{entry['name']}", local / "history" / entry["name"])
+    # Heartbeat last: a pull of many assets takes minutes, and an early copy would look stale
+    if "heartbeat.json" in root:
+        _download("/heartbeat.json", staging / "heartbeat.json")
     (staging / ".pulled").write_text(dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
     if dest.exists():
         shutil.rmtree(dest)
