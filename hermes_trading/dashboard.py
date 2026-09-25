@@ -2,8 +2,8 @@
 
 Serves dashboard.html on http://127.0.0.1:<port> (localhost only). Data sources:
   • dashboard_state/ — the dashboard's own mirror of the Railway volume, refreshed on start,
-    every 10 minutes and from the "Sync" button. Separate from remote_state/, which the
-    scheduled reflection task owns.
+    every minute (every 5 without the worker's state server) and from the "Sync" button.
+    Separate from remote_state/, which the scheduled reflection task owns.
   • live 1-minute candles from the exchange, for the price and RSI charts.
 """
 from __future__ import annotations
@@ -30,7 +30,8 @@ from .storage import load_yaml, read_jsonl
 
 DASH_DIR = config.ROOT / "dashboard_state"
 PAGE = Path(__file__).with_name("dashboard.html")
-SYNC_EVERY_S = 600
+SYNC_EVERY_FAST_S = 60   # with the state server: one small request
+SYNC_EVERY_CLI_S = 300   # Railway CLI fallback: ~40s per pull
 CANDLES = 180  # 3 hours of 1-minute candles
 CANDLE_TTL_S = 30
 FALLBACK_EXCHANGES = ("binance", "kraken", "okx")
@@ -72,7 +73,8 @@ SYNC = Sync()
 
 def _auto_sync() -> None:
     while True:
-        time.sleep(SYNC_EVERY_S)
+        fast = config.env("HERMES_STATE_URL") and config.env("HERMES_STATE_TOKEN")
+        time.sleep(SYNC_EVERY_FAST_S if fast else SYNC_EVERY_CLI_S)
         SYNC.start()
 
 

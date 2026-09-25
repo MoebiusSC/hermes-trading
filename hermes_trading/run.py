@@ -7,7 +7,7 @@ import json
 import shutil
 import sys
 
-from . import config
+from . import config, state_server
 from .adapters import SchemaError
 from .loop import Worker
 from .storage import load_yaml
@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> None:
     goal = load_yaml(config.GOAL_FILE)
     assets = [args.asset] if args.asset else config.goal_assets(goal)
     migrate_legacy_layout(assets[0])
+    state_server.start()
     try:
         _run(Worker(assets, goal).run(once=args.once))
     except KeyboardInterrupt:

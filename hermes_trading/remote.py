@@ -1,6 +1,6 @@
 """Sync with the Railway volume — the source of truth for the deployed worker's state.
 
-  python -m hermes_trading.remote pull                 volume → remote_state/ (a fresh mirror)
+  python -m hermes_trading.remote pull                 worker state → remote_state/ (a fresh mirror)
   python -m hermes_trading.remote push [ASSET ...]     reflection files → volume (default: all assets)
   python -m hermes_trading.remote push-goal            local state/goal.yaml → volume (then redeploy)
   python -m hermes_trading.remote reflect --fallback   pull, reflect every asset, push the ones that changed
@@ -11,13 +11,17 @@ minute; no redeploy. goal.yaml (the asset list) is read at boot, so push-goal ne
 Only reflection outputs are pushed (history/, hypotheses.jsonl, strategy.yaml). Files the worker
 writes (trades.jsonl, paper_account.json, heartbeat.json) are pull-only, so the two never race.
 
-Uses the Railway CLI's volume file commands, which need an SSH key registered with Railway.
+Pulls come from the worker's state server (state_server.py) when HERMES_STATE_URL and
+HERMES_STATE_TOKEN are set: one request that sends only new or changed files. Otherwise, or if
+that fails, pulls fall back to the Railway CLI. Pushes always use the CLI's volume file commands,
+which need an SSH key registered with Railway.
 Overrides: RAILWAY_CMD (CLI path), RAILWAY_VOLUME (volume name).
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import shlex
@@ -27,12 +31,12 @@ import sys
 import time
 from pathlib import Path
 
-from . import config
-from .storage import load_yaml
+import httpx
+
+from . import config, reflect as reflection
+from .storage import load_yaml, read_jsonl
 
 REMOTE_DIR = config.ROOT / "remote_state"
-ROOT_FILES = ("goal.yaml", "strategy.template.yaml", "heartbeat.json")
-ASSET_FILES = ("strategy.yaml", "trades.jsonl", "hypotheses.jsonl", "paper_account.json")
 # CLI failures worth retrying: dropped or reset connections to Railway's API
 TRANSIENT_ERRORS = ("connection error", "error sending request", "os error 10054", "connection reset", "timed out")
 
@@ -75,41 +79,65 @@ def _list(remote_dir: str) -> list[dict]:
     return json.loads(out[out.index("{"):])["files"]
 
 
-def _download(remote: str, local: Path) -> None:
-    local.parent.mkdir(parents=True, exist_ok=True)
-    _volume_files("download", remote, str(local), "--overwrite")
+def _pull_cli(staging: Path) -> None:
+    """One directory download (the CLI fetches files concurrently) instead of a CLI call per
+    file: each call costs ~4s of startup and auth, which added up to minutes."""
+    _volume_files("download", "/", str(staging), "--overwrite")
+    shutil.rmtree(staging / "lost+found", ignore_errors=True)  # ext4 artifact of the volume
+
+
+def _pull_http(dest: Path, staging: Path) -> None:
+    """Start from the previous mirror and apply only what the state server says changed."""
+    url, token = config.env("HERMES_STATE_URL"), config.env("HERMES_STATE_TOKEN")
+    if dest.is_dir():
+        shutil.copytree(dest, staging)
+    else:
+        staging.mkdir(parents=True)
+    have = {}
+    for path in staging.rglob("*"):
+        rel = path.relative_to(staging)
+        if path.is_file() and not rel.name.startswith("."):
+            data = path.read_bytes()
+            have[rel.as_posix()] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    r = httpx.post(url.rstrip("/") + "/state", json={"have": have},
+                   headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    r.raise_for_status()
+    files = r.json()["files"]
+    for rel, change in files.items():
+        target = staging / rel
+        if "data" in change:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(change["data"].encode("utf-8"))
+        elif "append" in change:
+            with open(target, "ab") as f:
+                f.write(change["append"].encode("utf-8"))
+    for rel in set(have) - set(files):  # gone from the worker's state
+        (staging / rel).unlink()
 
 
 def pull(dest: Path = REMOTE_DIR) -> None:
-    """Rebuild `dest` as a fresh mirror of the volume. Downloads into a sibling temp dir and
+    """Rebuild `dest` as a fresh mirror of the worker's state. Builds a sibling temp dir and
     swaps it in at the end, so readers never see a half-finished pull."""
     staging = dest.with_name(dest.name + ".incoming")
     if staging.exists():
         shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    root = {e["name"] for e in _list("/") if e["type"] == "file"}
-    for name in ROOT_FILES:
-        if name in root and name != "heartbeat.json":
-            _download(f"/{name}", staging / name)
-    for asset_dir in (e["name"] for e in _list("/assets") if e["type"] == "directory"):
-        base = f"/assets/{asset_dir}"
-        local = staging / "assets" / asset_dir
-        present = {e["name"] for e in _list(base) if e["type"] == "file"}
-        for name in ASSET_FILES:
-            if name in present:
-                _download(f"{base}/{name}", local / name)
-        (local / "history").mkdir(parents=True, exist_ok=True)
-        for entry in _list(f"{base}/history"):
-            if entry["type"] == "file":
-                _download(f"{base}/history/{entry['name']}", local / "history" / entry["name"])
-    # Heartbeat last: a pull of many assets takes minutes, and an early copy would look stale
-    if "heartbeat.json" in root:
-        _download("/heartbeat.json", staging / "heartbeat.json")
+    source = "Railway volume"
+    if config.env("HERMES_STATE_URL") and config.env("HERMES_STATE_TOKEN"):
+        try:
+            _pull_http(dest, staging)
+            source = "state server"
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            print(f"State server unavailable ({type(e).__name__}: {e}) — falling back to the Railway CLI.", flush=True)
+            shutil.rmtree(staging, ignore_errors=True)
+    if source != "state server":
+        _pull_cli(staging)
+    for asset_dir in (staging / "assets").glob("*/"):
+        (asset_dir / "history").mkdir(exist_ok=True)
     (staging / ".pulled").write_text(dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
     if dest.exists():
         shutil.rmtree(dest)
     staging.rename(dest)
-    print(f"Pulled Railway state → {dest}", flush=True)
+    print(f"Pulled worker state from the {source} -> {dest}", flush=True)
 
 
 def _asset_dirs() -> list[str]:
@@ -148,8 +176,24 @@ def _strategies() -> dict[str, str]:
     }
 
 
+def _due_assets() -> list[str]:
+    """Assets with enough new closed trades for a reflection cycle (same rule as reflect.py)."""
+    goal = load_yaml(REMOTE_DIR / "goal.yaml")
+    due = []
+    for asset in config.goal_assets(goal):
+        root = REMOTE_DIR / "assets" / config.asset_slug(asset)
+        pending = reflection.new_trades_since_last_reflection(
+            read_jsonl(root / "trades.jsonl"), read_jsonl(root / "hypotheses.jsonl"))
+        if pending >= int(goal["reflection_every"]):
+            due.append(asset)
+    return due
+
+
 def reflect(hermes: bool, force: bool) -> int:
     pull()
+    if not force and not _due_assets():
+        print("No asset has enough new closed trades — skipping reflection.", flush=True)
+        return 0
     before = _strategies()
     cmd = [sys.executable, "-m", "hermes_trading.reflect", "--hermes" if hermes else "--fallback"]
     if force:
