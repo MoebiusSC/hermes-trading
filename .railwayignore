@@ -1,0 +1,13 @@
+.env
+.venv/
+worker.log
+worker.err.log
+state/paper_account.json
+state/heartbeat.json
+__pycache__/
+remote_state/
+reflect.log
+state/assets/
+dashboard_state/
+remote_state.incoming/
+dashboard_state.incoming/

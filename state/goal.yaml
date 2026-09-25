@@ -1,0 +1,14 @@
+assets:                      # each gets its own strategy, paper account and reflection cycle
+  - "BTC/USDT"               # crypto: BASE/QUOTE, simulated fills, $10,000 virtual account each
+  - "SOL/USDT"
+  - "ETH/USDT"
+  - "DOGE/USDT"
+  - "SPY"                    # stocks/ETFs: bare ticker, real fills in the Alpaca paper account
+  - "QQQ"
+stock_equity_per_asset: 500  # virtual account per stock; together within the $1,000 Alpaca balance
+target_return_30d: 0.05      # success
+max_drawdown:      0.08      # failure
+min_sharpe:        1.2       # quality bar
+failure_below:     -0.04     # score floor — steeply negative below this
+reflection_every:  5         # cycle cadence (per asset)
+one_variable_only: true      # scientific-method guardrail

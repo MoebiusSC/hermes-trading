@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# environment / caches
+.venv/
+__pycache__/
+
+# logs
+*.log
+
+# runtime state (lives on the Railway volume; pulled copies are local only)
+state/assets/
+state/heartbeat.json
+state/paper_account.json
+remote_state/
+remote_state.incoming/
+dashboard_state/
+dashboard_state.incoming/

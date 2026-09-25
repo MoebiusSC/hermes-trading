@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Trading</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --wash: rgba(11,11,11,0.04);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --delta-up: #006300; --delta-down: #d03b3b;
+  --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835;
+    --border: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.05);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+    --delta-up: #0ca30c; --delta-down: #e66767; --accent: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #898781;
+  --grid: #2c2c2a; --baseline: #383835;
+  --border: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.05);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+  --delta-up: #0ca30c; --delta-down: #e66767; --accent: #3987e5;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 20px; margin: 0; font-weight: 650; }
+h2 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.muted { color: var(--text-muted); }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 18px; }
+header .spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-1); font-size: 13px; }
+.pill .icon { font-size: 11px; }
+button {
+  font: inherit; color: var(--text-primary); background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer;
+}
+button:hover { background: var(--wash); }
+button:focus-visible, .card:focus-visible, svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button[disabled] { opacity: .6; cursor: default; }
+.panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.grid-tiles { display: grid; grid-template-columns: minmax(240px, 1.4fr) repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; }
+.tile.hero .value { font-size: 48px; line-height: 1.1; letter-spacing: -0.01em; }
+.tile .delta { font-size: 13px; margin-top: 2px; }
+.up { color: var(--delta-up); } .down { color: var(--delta-down); }
+.section { margin-top: 12px; }
+.chart-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+.chart-head .spacer { flex: 1; }
+.chart-head button { padding: 3px 10px; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--text-secondary); margin: 2px 0 8px; }
+.legend .key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 6px; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .empty { color: var(--text-muted); padding: 32px 0; text-align: center; }
+.tooltip {
+  position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+  min-width: 130px; z-index: 5; display: none;
+}
+.tooltip .t { color: var(--text-muted); margin-bottom: 4px; }
+.tooltip .row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tooltip .row .key { width: 10px; height: 2px; border-radius: 1px; flex: none; }
+.tooltip .row strong { font-variant-numeric: tabular-nums; }
+.tooltip .row span { color: var(--text-secondary); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.card { cursor: pointer; text-align: left; padding: 14px; display: block; width: 100%; min-width: 0; overflow: hidden; }
+.card > span, .card .meter > span { display: block; }
+.card[aria-pressed="true"] { border-color: var(--text-secondary); box-shadow: inset 0 0 0 1px var(--text-secondary); }
+.card .top { display: flex; align-items: center; gap: 8px; }
+.card .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.card .name { font-weight: 600; }
+.card .ver { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+.card .price { font-size: 22px; font-weight: 600; margin-top: 6px; }
+.card .line { color: var(--text-secondary); font-size: 13px; }
+.card .spark { height: 36px; margin: 6px 0 4px; }
+.meter { position: relative; height: 6px; border-radius: 3px; background: var(--grid); margin: 6px 0 2px; }
+.meter .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.meter .tick { position: absolute; top: -3px; width: 2px; height: 12px; background: var(--text-secondary); border-radius: 1px; }
+.detail { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-top: 12px; }
+.detail > .stack { display: grid; gap: 12px; align-content: start; }
+.grid-tiles > *, .cards > *, .detail > *, .stack > * { min-width: 0; }
+@media (max-width: 860px) {
+  .detail { grid-template-columns: 1fr; }
+  .grid-tiles { grid-template-columns: 1fr 1fr; }
+  .tile.hero { grid-column: 1 / -1; }
+  .tile.hero .value { font-size: 40px; }
+}
+@media (max-width: 520px) { .cards { grid-template-columns: 1fr; } }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 500; color: var(--text-secondary); border-bottom: 1px solid var(--baseline); padding: 6px 8px 6px 0; white-space: nowrap; }
+td { border-bottom: 1px solid var(--grid); padding: 6px 8px 6px 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.wrap { white-space: normal; }
+.table-wrap { overflow-x: auto; }
+dl.params { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 8px 0 0; font-size: 13px; }
+dl.params dt { color: var(--text-secondary); } dl.params dd { margin: 0; font-variant-numeric: tabular-nums; }
+.history { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 10px; }
+.history li { border-left: 2px solid var(--baseline); padding-left: 10px; }
+.history .what { font-weight: 500; }
+.history .why { color: var(--text-secondary); font-size: 13px; }
+.banner { display: none; margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-1); color: var(--text-secondary); }
+.banner.show { display: block; }
+.stale { opacity: .6; transition: opacity .2s; }
+footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Hermes Trading</h1>
+    <span class="pill" id="worker-pill"><span class="icon" aria-hidden="true">○</span><span>Loading…</span></span>
+    <span class="pill"><span class="icon" aria-hidden="true">◆</span><span>Paper mode</span></span>
+    <span class="spacer"></span>
+    <span class="sub" id="synced">—</span>
+    <button id="sync-btn" type="button">Sync from Railway</button>
+  </header>
+  <div class="banner" id="banner" role="status"></div>
+
+  <div id="content" hidden>
+    <div class="grid-tiles" id="tiles"></div>
+
+    <section class="panel section">
+      <div class="chart-head">
+        <div>
+          <h2>Return by asset</h2>
+          <div class="sub">Realized paper return since each asset's first trade, as % of its own paper account (crypto $10,000 · stocks $500)</div>
+        </div>
+        <span class="spacer"></span>
+        <button type="button" data-table="returns">Table</button>
+      </div>
+      <div class="legend" id="returns-legend"></div>
+      <div class="chart" id="returns-chart"></div>
+      <div class="table-wrap" id="returns-table" hidden></div>
+    </section>
+
+    <section class="section">
+      <div class="cards" id="cards" role="group" aria-label="Select an asset"></div>
+    </section>
+
+    <div class="detail">
+      <div class="stack">
+        <section class="panel">
+          <div class="chart-head">
+            <div><h2 id="price-title">Price</h2><div class="sub" id="price-sub">Last 180 one-minute closes</div></div>
+            <span class="spacer"></span>
+            <button type="button" data-table="price">Table</button>
+          </div>
+          <div class="chart" id="price-chart"></div>
+          <div class="table-wrap" id="price-table" hidden></div>
+        </section>
+        <section class="panel">
+          <div class="chart-head">
+            <div><h2>RSI (14)</h2><div class="sub" id="rsi-sub">Entry and exit levels from the current strategy</div></div>
+          </div>
+          <div class="chart" id="rsi-chart"></div>
+        </section>
+        <section class="panel">
+          <h2>Closed trades</h2>
+          <div class="table-wrap" id="trades-table"></div>
+        </section>
+      </div>
+      <div class="stack">
+        <section class="panel">
+          <h2 id="strategy-title">Strategy</h2>
+          <div class="sub" id="strategy-sub"></div>
+          <dl class="params" id="params"></dl>
+        </section>
+        <section class="panel">
+          <h2>Strategy history</h2>
+          <div class="sub">One variable changed per reflection</div>
+          <ul class="history" id="history"></ul>
+        </section>
+      </div>
+    </div>
+    <footer id="footer"></footer>
+  </div>
+</main>
+
+<script>
+"use strict";
+const SERIES_VARS = ["--series-1", "--series-2", "--series-3", "--series-4", "--series-5", "--series-6"];
+const SVGNS = "http://www.w3.org/2000/svg";
+let state = null;
+let candles = {};
+let selected = null;
+const tableOpen = { returns: false, price: false };
+
+// ---------- formatting ----------
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const usd = (v, d = 2) => (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const signedUsd = (v) => (v >= 0 ? "+" : "") + usd(v);
+const pct = (v, d = 2) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d) + "%";
+function priceFmt(v) {
+  if (v == null) return "—";
+  const d = v >= 100 ? 2 : v >= 1 ? 3 : 5;
+  return v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+const timeFmt = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const dateTimeFmt = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+function ago(iso) {
+  if (!iso) return "never";
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+function el(tag, attrs = {}, text) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  return n;
+}
+function svg(tag, attrs = {}) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  return n;
+}
+const colorFor = (asset) => {
+  const i = state.goal.assets.indexOf(asset);
+  return css(SERIES_VARS[i] || "--text-muted");
+};
+
+// ---------- trading helpers ----------
+function lastPrice(a) {
+  const c = candles[a.asset];
+  if (c && c.close.length) return c.close[c.close.length - 1];
+  return a.tick ? a.tick.last_price : null;
+}
+function unrealized(a) {
+  const p = a.paper.position, last = lastPrice(a);
+  if (!p || last == null) return 0;
+  return (p.direction === "long" ? 1 : -1) * p.qty * (last - p.entry_price);
+}
+
+// ---------- scales ----------
+function niceTicks(min, max, count = 5) {
+  if (!isFinite(min) || !isFinite(max)) { min = 0; max = 1; }
+  if (min === max) { const pad = Math.abs(min) * 0.01 || 1; min -= pad; max += pad; }
+  const raw = (max - min) / count, mag = 10 ** Math.floor(Math.log10(raw)), n = raw / mag;
+  const step = (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, ticks = [];
+  for (let v = lo; v <= hi + step / 2; v += step) ticks.push(+v.toPrecision(12));
+  return { lo, hi, ticks, step };
+}
+const decimalsFor = (step) => Math.max(0, Math.min(8, -Math.floor(Math.log10(step) + 1e-9)));
+function timeTicks(x0, x1, maxTicks) {
+  const MIN = 60000, steps = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map((m) => m * MIN);
+  const step = steps.find((s) => (x1 - x0) / s <= maxTicks) || steps[steps.length - 1];
+  const tzOffset = new Date(x0).getTimezoneOffset() * MIN;  // align ticks to local clock
+  const out = [];
+  for (let t = Math.ceil((x0 - tzOffset) / step) * step + tzOffset; t <= x1; t += step) out.push(t);
+  return { ticks: out, step };
+}
+
+// ---------- line chart ----------
+// opts: { series:[{name,color,points:[[x,y]]}], step, height, yFmt, yDomain:[lo,hi],
+//         refs:[{y,label,color,dashed}], marks:[{x,y,shape,label}], endLabels, xMax, tooltipFmt }
+function lineChart(host, opts) {
+  host.replaceChildren();
+  const pts = opts.series.flatMap((s) => s.points);
+  if (!pts.length) { host.append(el("div", { class: "empty" }, opts.emptyText || "No data yet")); return; }
+  const W = Math.max(280, host.clientWidth), H = opts.height || 220;
+  const hasRefs = (opts.refs || []).length > 0;
+  const m = { l: 60, r: opts.endLabels || hasRefs ? 118 : 16, t: 10, b: 26 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+
+  const xs = pts.map((p) => p[0]);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs, opts.xMax || -Infinity);
+  if (x0 === x1) { x0 -= 30 * 60000; x1 += 30 * 60000; }
+  const yVals = pts.map((p) => p[1]).concat((opts.refs || []).map((r) => r.y), (opts.marks || []).map((k) => k.y));
+  const yt = opts.yDomain ? { ...niceTicks(...opts.yDomain), lo: opts.yDomain[0], hi: opts.yDomain[1] } : (() => {
+    const lo = Math.min(...yVals), hi = Math.max(...yVals), pad = (hi - lo) * 0.08;
+    return niceTicks(lo - pad, hi + pad);
+  })();
+  if (opts.yDomain) yt.ticks = yt.ticks.filter((t) => t >= yt.lo && t <= yt.hi);
+  const X = (x) => m.l + ((x - x0) / (x1 - x0)) * iw;
+  const Y = (y) => m.t + ih - ((y - yt.lo) / (yt.hi - yt.lo)) * ih;
+  const yFmt = opts.yFmt || ((v) => v.toFixed(decimalsFor(yt.step)));
+
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, tabindex: "0", role: "img",
+    "aria-label": opts.label || "chart" });
+  // grid + y axis
+  for (const t of yt.ticks) {
+    root.append(svg("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: css("--grid"), "stroke-width": 1 }));
+    const lab = svg("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end", "font-size": 11, fill: css("--text-muted") });
+    lab.style.fontVariantNumeric = "tabular-nums";
+    lab.textContent = yFmt(t, yt.step);
+    root.append(lab);
+  }
+  root.append(svg("line", { x1: m.l, x2: W - m.r, y1: m.t + ih, y2: m.t + ih, stroke: css("--baseline"), "stroke-width": 1 }));
+  // x axis
+  const tt = timeTicks(x0, x1, Math.max(2, Math.floor(iw / 90)));
+  const fmtX = tt.step >= 1440 * 60000 || x1 - x0 > 2 * 86400000 ? (t) => new Date(t).toLocaleDateString([], { month: "short", day: "numeric" }) : timeFmt;
+  for (const t of tt.ticks) {
+    const lab = svg("text", { x: X(t), y: H - 6, "text-anchor": "middle", "font-size": 11, fill: css("--text-muted") });
+    lab.textContent = fmtX(t);
+    root.append(lab);
+  }
+  // reference lines
+  // labels live in the right margin, nudged apart so close levels (entry vs price) stay readable
+  const refLabels = [];
+  for (const r of (opts.refs || []).filter((r) => r.y >= yt.lo && r.y <= yt.hi)) {
+    root.append(svg("line", { x1: m.l, x2: W - m.r, y1: Y(r.y), y2: Y(r.y), stroke: r.color, "stroke-width": 1.5,
+      "stroke-dasharray": r.dashed ? "5 4" : "none" }));
+    refLabels.push({ r, y: Y(r.y) + 4 });
+  }
+  refLabels.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < refLabels.length; i++) refLabels[i].y = Math.max(refLabels[i].y, refLabels[i - 1].y + 13);
+  for (const { r, y } of refLabels) {
+    const lab = svg("text", { x: W - m.r + 8, y, "font-size": 11, fill: css("--text-secondary") });
+    lab.textContent = r.label;
+    root.append(lab);
+  }
+  // series
+  const pathFor = (s) => s.points.map((p, i) => {
+    if (i === 0) return `M${X(p[0])},${Y(p[1])}`;
+    return opts.step ? `H${X(p[0])}V${Y(p[1])}` : `L${X(p[0])},${Y(p[1])}`;
+  }).join("") + (opts.step && opts.xMax ? `H${X(opts.xMax)}` : "");
+  for (const s of opts.series) {
+    if (!s.points.length) continue;
+    root.append(svg("path", { d: pathFor(s), fill: "none", stroke: s.color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  }
+  // trade marks (shape carries entry/exit, not color)
+  for (const k of opts.marks || []) {
+    if (k.x < x0 || k.x > x1) continue;
+    const cx = X(k.x), cy = Y(k.y), s = 6;
+    const d = k.shape === "entry" ? `M${cx},${cy - s}L${cx + s},${cy + s * 0.8}L${cx - s},${cy + s * 0.8}Z`
+                                  : `M${cx},${cy + s}L${cx + s},${cy - s * 0.8}L${cx - s},${cy - s * 0.8}Z`;
+    const mark = svg("path", { d, fill: css("--text-primary"), stroke: css("--surface-1"), "stroke-width": 2 });
+    const title = svg("title"); title.textContent = k.label; mark.append(title);
+    root.append(mark);
+  }
+  // end labels (skipped when they would collide; the legend still carries identity)
+  if (opts.endLabels) {
+    const ends = opts.series.filter((s) => s.points.length).map((s) => {
+      const p = s.points[s.points.length - 1];
+      return { s, x: opts.step && opts.xMax ? opts.xMax : p[0], y: p[1] };
+    }).sort((a, b) => Y(a.y) - Y(b.y));
+    const collide = ends.some((e, i) => i > 0 && Y(e.y) - Y(ends[i - 1].y) < 15);
+    for (const e of ends) {
+      root.append(svg("circle", { cx: X(e.x), cy: Y(e.y), r: 4, fill: e.s.color, stroke: css("--surface-1"), "stroke-width": 2 }));
+      if (collide) continue;
+      const lab = svg("text", { x: X(e.x) + 9, y: Y(e.y) + 4, "font-size": 12, fill: css("--text-primary") });
+      lab.textContent = `${e.s.name} ${yFmt(e.y, yt.step / 10)}`;
+      root.append(lab);
+    }
+  }
+  // hover: crosshair + one tooltip listing every series at that x
+  const hoverXs = [...new Set(pts.map((p) => p[0]))].sort((a, b) => a - b);
+  const cross = svg("line", { y1: m.t, y2: m.t + ih, stroke: css("--baseline"), "stroke-width": 1, visibility: "hidden" });
+  const dots = svg("g", { visibility: "hidden" });
+  root.append(cross, dots);
+  const tip = el("div", { class: "tooltip", role: "status" });
+  const valueAt = (s, x) => {
+    let best = null;
+    for (const p of s.points) {
+      if (opts.step ? p[0] <= x : true) {
+        if (opts.step) best = p;
+        else if (!best || Math.abs(p[0] - x) < Math.abs(best[0] - x)) best = p;
+      }
+    }
+    return best;
+  };
+  let idx = -1;
+  function show(i) {
+    idx = Math.max(0, Math.min(hoverXs.length - 1, i));
+    const x = hoverXs[idx];
+    cross.setAttribute("x1", X(x)); cross.setAttribute("x2", X(x)); cross.setAttribute("visibility", "visible");
+    dots.replaceChildren(); dots.setAttribute("visibility", "visible");
+    tip.replaceChildren(el("div", { class: "t" }, dateTimeFmt(x)));
+    for (const s of opts.series) {
+      const p = valueAt(s, x);
+      if (!p) continue;
+      dots.append(svg("circle", { cx: X(x), cy: Y(p[1]), r: 4, fill: s.color, stroke: css("--surface-1"), "stroke-width": 2 }));
+      const row = el("div", { class: "row" });
+      const key = el("span", { class: "key" }); key.style.background = s.color;
+      row.append(key, el("strong", {}, (opts.tooltipFmt || yFmt)(p[1], yt.step / 10)), el("span", {}, s.name));
+      tip.append(row);
+    }
+    tip.style.display = "block";
+    const left = X(x) + 14 + tip.offsetWidth > W ? X(x) - 14 - tip.offsetWidth : X(x) + 14;
+    tip.style.left = left + "px"; tip.style.top = m.t + "px";
+  }
+  function hide() { cross.setAttribute("visibility", "hidden"); dots.setAttribute("visibility", "hidden"); tip.style.display = "none"; }
+  const nearest = (px) => {
+    const x = x0 + ((px - m.l) / iw) * (x1 - x0);
+    let bi = 0;
+    for (let i = 1; i < hoverXs.length; i++) if (Math.abs(hoverXs[i] - x) < Math.abs(hoverXs[bi] - x)) bi = i;
+    return bi;
+  };
+  const hit = svg("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+  hit.addEventListener("pointermove", (e) => {
+    const r = root.getBoundingClientRect();
+    show(nearest(((e.clientX - r.left) / r.width) * W));
+  });
+  hit.addEventListener("pointerleave", hide);
+  root.append(hit);
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") { show(idx < 0 ? 0 : idx + 1); e.preventDefault(); }
+    if (e.key === "ArrowLeft") { show(idx < 0 ? hoverXs.length - 1 : idx - 1); e.preventDefault(); }
+    if (e.key === "Escape") hide();
+  });
+  root.addEventListener("focus", () => show(hoverXs.length - 1));
+  root.addEventListener("blur", hide);
+  host.append(root, tip);
+}
+
+function sparkline(host, values, color) {
+  host.replaceChildren();
+  const vals = values.filter((v) => v != null);
+  if (vals.length < 2) return;
+  const W = Math.floor(host.getBoundingClientRect().width) || 180, H = 36, lo = Math.min(...vals), hi = Math.max(...vals);
+  const Y = (v) => 3 + (H - 6) * (1 - (v - lo) / (hi - lo || 1));
+  const d = vals.map((v, i) => `${i ? "L" : "M"}${(i / (vals.length - 1)) * (W - 6) + 3},${Y(v)}`).join("");
+  const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, "aria-hidden": "true" });
+  s.style.display = "block";
+  s.append(svg("path", { d, fill: "none", stroke: color, "stroke-width": 1.5, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  s.append(svg("circle", { cx: W - 4, cy: Y(vals[vals.length - 1]), r: 3, fill: color, stroke: css("--surface-1"), "stroke-width": 1.5 }));
+  host.append(s);
+}
+
+function table(host, headers, rows) {
+  host.replaceChildren();
+  if (!rows.length) { host.append(el("div", { class: "muted" }, "Nothing yet")); return; }
+  const t = el("table"), thead = el("thead"), tr = el("tr");
+  headers.forEach((h) => tr.append(el("th", {}, h)));
+  thead.append(tr); t.append(thead);
+  const tb = el("tbody");
+  for (const r of rows) {
+    const row = el("tr");
+    r.forEach((c) => {
+      const td = el("td", c && c.cls ? { class: c.cls } : {}, c && typeof c === "object" ? c.text : c);
+      row.append(td);
+    });
+    tb.append(row);
+  }
+  t.append(tb); host.append(t);
+}
+
+// ---------- sections ----------
+function renderHeader() {
+  const pill = document.getElementById("worker-pill");
+  const w = state.worker || {};
+  const hbAgeAtPull = state.pulled_at && w.ts ? (Date.parse(state.pulled_at) - Date.parse(w.ts)) / 1000 : Infinity;
+  let icon = "●", label = "Worker running", color = "--good";
+  if (w.state === "halted") { icon = "✖"; label = "Worker halted"; color = "--critical"; }
+  else if (w.state === "error") { icon = "▲"; label = "Worker error"; color = "--serious"; }
+  else if (hbAgeAtPull > 300) { icon = "▲"; label = "No recent heartbeat"; color = "--warning"; }
+  pill.children[0].textContent = icon; pill.children[0].style.color = css(color);
+  pill.children[1].textContent = `${label}${w.ts ? " · last tick " + timeFmt(Date.parse(w.ts)) : ""}`;
+  const syncing = state.sync && state.sync.running;
+  document.getElementById("synced").textContent = syncing ? "Syncing from Railway…" : `Railway data synced ${ago(state.pulled_at)}`;
+  document.getElementById("sync-btn").disabled = !!syncing;
+  document.getElementById("content").classList.toggle("stale", !!syncing);
+  const banner = document.getElementById("banner");
+  if (state.sync && state.sync.error) { banner.textContent = "Last sync failed: " + state.sync.error; banner.classList.add("show"); }
+  else banner.classList.remove("show");
+}
+
+function tile(label, value, delta, deltaCls, hero) {
+  const t = el("div", { class: "panel tile" + (hero ? " hero" : "") });
+  t.append(el("div", { class: "label" }, label), el("div", { class: "value" }, value));
+  if (delta) t.append(el("div", { class: "delta " + (deltaCls || "sub") }, delta));
+  return t;
+}
+
+function renderTiles() {
+  const A = state.assets, start = A.reduce((s, a) => s + a.start_equity, 0);
+  const equity = A.reduce((s, a) => s + a.paper.equity, 0);
+  const realized = equity - start;
+  const unreal = A.reduce((s, a) => s + unrealized(a), 0);
+  const closed = A.reduce((s, a) => s + a.trades.length, 0);
+  const wins = A.reduce((s, a) => s + a.trades.filter((t) => t.pnl > 0).length, 0);
+  const open = A.filter((a) => a.paper.position).length;
+  const changes = A.reduce((s, a) => s + a.hypotheses.length, 0);
+  const dir = (v) => (v > 0 ? "up" : v < 0 ? "down" : "sub");
+  const arrow = (v) => (v > 0 ? "▲ " : v < 0 ? "▼ " : "");
+  document.getElementById("tiles").replaceChildren(
+    tile("Paper equity (realized)", usd(equity), `${arrow(realized)}${signedUsd(realized)} (${pct((realized / start) * 100, 3)}) on ${usd(start, 0)}`, dir(realized), true),
+    tile("Unrealized P&L", signedUsd(unreal), open ? `${open} open position${open > 1 ? "s" : ""}, at live prices` : "No open positions"),
+    tile("Closed trades", String(closed), closed ? `${Math.round((wins / closed) * 100)}% winners` : "Waiting for the first exit"),
+    tile("Open positions", `${open} of ${A.length}`),
+    tile("Strategy changes", String(changes), `Reflection every ${state.goal.reflection_every} closed trades per asset`),
+  );
+}
+
+function returnSeries() {
+  return state.assets.map((a) => {
+    const t = a.trades;
+    const points = t.length ? [[Date.parse(t[0].opened_at), 0], ...t.map((x) => [Date.parse(x.closed_at), (x.equity_after / a.start_equity - 1) * 100])] : [];
+    return { name: a.asset.split("/")[0], asset: a.asset, color: colorFor(a.asset), points };
+  });
+}
+
+function renderReturns() {
+  const series = returnSeries();
+  const legend = document.getElementById("returns-legend");
+  legend.replaceChildren(...series.map((s) => {
+    const item = el("span");
+    const key = el("span", { class: "key" }); key.style.background = s.color;
+    item.append(key, document.createTextNode(s.points.length ? s.name : `${s.name} · no closed trades yet`));
+    return item;
+  }));
+  lineChart(document.getElementById("returns-chart"), {
+    series, step: true, xMax: Date.now(), height: 220, endLabels: true, label: "Realized return by asset",
+    yFmt: (v, step) => pct(v, Math.max(2, decimalsFor(step))),
+    emptyText: "No closed trades yet — the chart starts at the first exit.",
+  });
+  const rows = state.assets.flatMap((a) => a.trades.map((t) => [a.asset, dateTimeFmt(Date.parse(t.closed_at)),
+    { text: pct(t.pnl_pct * 100, 3), cls: t.pnl >= 0 ? "up" : "down" }, usd(t.equity_after), pct((t.equity_after / a.start_equity - 1) * 100, 3)]))
+    .sort((a, b) => (a[1] < b[1] ? 1 : -1));
+  table(document.getElementById("returns-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
+}
+
+function renderCards() {
+  const host = document.getElementById("cards");
+  host.replaceChildren();
+  for (const a of state.assets) {
+    const color = colorFor(a.asset), tick = a.tick || {}, c = candles[a.asset];
+    const card = el("button", { class: "panel card", type: "button", "aria-pressed": String(a.asset === selected) });
+    const top = el("span", { class: "top" });
+    const sw = el("span", { class: "swatch" }); sw.style.background = color;
+    top.append(sw, el("span", { class: "name" }, a.asset), el("span", { class: "ver" }, a.strategy ? "v" + a.strategy.version : ""));
+    const last = lastPrice(a);
+    const spark = el("span", { class: "spark" });
+    const rsiNow = c ? c.rsi[c.rsi.length - 1] : tick.rsi;
+    const thr = a.strategy ? a.strategy.entry.threshold : null;
+    const meter = el("span", { class: "meter", "aria-hidden": "true" });
+    if (rsiNow != null) {
+      const fill = el("span", { class: "fill" }); fill.style.width = rsiNow + "%"; fill.style.background = color; meter.append(fill);
+    }
+    if (thr != null) { const tk = el("span", { class: "tick" }); tk.style.left = `calc(${thr}% - 1px)`; meter.append(tk); }
+    const pos = a.paper.position;
+    const posLine = pos
+      ? `Open ${pos.direction} from ${priceFmt(pos.entry_price)} · ${signedUsd(unrealized(a))}`
+      : (tick.decision ? tick.decision.replace(/^./, (x) => x.toUpperCase()) : "No data yet");
+    card.append(top, el("span", { class: "price" }, priceFmt(last)), spark,
+      el("span", { class: "line" }, `RSI ${rsiNow != null ? rsiNow.toFixed(1) : "—"} · entry ${a.strategy && a.strategy.entry.direction === "short" ? ">" : "<"} ${thr ?? "—"}`),
+      meter, el("span", { class: "line" }, posLine),
+      el("span", { class: "line" }, `${a.trades.length} closed · ${usd(a.paper.equity)}`));
+    card.addEventListener("click", () => { selected = a.asset; render(); });
+    host.append(card);
+    if (c) sparkline(spark, c.close, color);
+  }
+}
+
+function renderDetail() {
+  const a = state.assets.find((x) => x.asset === selected);
+  if (!a) return;
+  const color = colorFor(a.asset), c = candles[a.asset], strat = a.strategy;
+  document.getElementById("price-title").textContent = `${a.asset} price`;
+  document.getElementById("price-sub").textContent = c ? `Last 180 one-minute closes · ${a.kind === "stock" ? "regular hours only, " : ""}live from ${c.source}` : "Loading live candles…";
+
+  const refs = [], marks = [];
+  const pos = a.paper.position;
+  if (pos) {
+    refs.push({ y: pos.entry_price, label: `Entry ${priceFmt(pos.entry_price)}`, color: css("--text-secondary"), dashed: false });
+    refs.push({ y: pos.stop, label: `Stop ${priceFmt(pos.stop)}`, color: css("--critical"), dashed: true });
+    refs.push({ y: pos.target, label: `Target ${priceFmt(pos.target)}`, color: css("--good"), dashed: true });
+    marks.push({ x: Date.parse(pos.opened_at), y: pos.entry_price, shape: "entry", label: `Entry ${priceFmt(pos.entry_price)}` });
+  }
+  for (const t of a.trades) {
+    marks.push({ x: Date.parse(t.opened_at), y: t.entry_price, shape: "entry", label: `Entry ${priceFmt(t.entry_price)}` });
+    marks.push({ x: Date.parse(t.closed_at), y: t.exit_price, shape: "exit", label: `Exit ${priceFmt(t.exit_price)} (${t.exit_reason})` });
+  }
+  const priceSeries = c ? [{ name: a.asset, color, points: c.t.map((t, i) => [t, c.close[i]]) }] : [{ name: a.asset, color, points: [] }];
+  const x0 = c ? c.t[0] : 0, x1 = c ? c.t[c.t.length - 1] : 0;
+  lineChart(document.getElementById("price-chart"), {
+    series: priceSeries, height: 240, label: `${a.asset} price`, refs, tooltipFmt: priceFmt,
+    marks: marks.filter((k) => k.x >= x0 && k.x <= x1), emptyText: "Loading live candles…",
+  });
+  if (c) {
+    const rows = c.t.slice(-30).map((t, i, arr) => {
+      const j = c.t.length - arr.length + i;
+      return [timeFmt(t), priceFmt(c.close[j]), c.rsi[j] != null ? c.rsi[j].toFixed(1) : "—"];
+    }).reverse();
+    table(document.getElementById("price-table"), ["Time", "Close", "RSI"], rows);
+  }
+
+  const dirLong = !strat || strat.entry.direction === "long";
+  const rsiRefs = strat ? [
+    { y: strat.entry.threshold, label: `Entry ${dirLong ? "<" : ">"} ${strat.entry.threshold}`, color: css("--text-secondary"), dashed: true },
+    { y: dirLong ? 70 : 30, label: `Exit ${dirLong ? ">" : "<"} ${dirLong ? 70 : 30}`, color: css("--text-muted"), dashed: true },
+  ] : [];
+  document.getElementById("rsi-sub").textContent = strat
+    ? `Opens a ${strat.entry.direction} when RSI ${dirLong ? "drops below" : "rises above"} ${strat.entry.threshold}; exits at ${dirLong ? 70 : 30}, the stop or the target`
+    : "";
+  lineChart(document.getElementById("rsi-chart"), {
+    series: c ? [{ name: "RSI", color, points: c.t.map((t, i) => [t, c.rsi[i]]).filter((p) => p[1] != null) }] : [{ name: "RSI", color, points: [] }],
+    height: 170, yDomain: [0, 100], refs: rsiRefs, label: `${a.asset} RSI`, yFmt: (v) => v.toFixed(0),
+    tooltipFmt: (v) => v.toFixed(1), emptyText: "Loading live candles…",
+  });
+
+  table(document.getElementById("trades-table"), ["Opened", "Closed", "Side", "Entry", "Exit", "Reason", "P&L"],
+    a.trades.slice().reverse().map((t) => [dateTimeFmt(Date.parse(t.opened_at)), dateTimeFmt(Date.parse(t.closed_at)), t.direction,
+      priceFmt(t.entry_price), priceFmt(t.exit_price), t.exit_reason.replace("_", " "),
+      { text: `${signedUsd(t.pnl)} (${pct(t.pnl_pct * 100, 3)})`, cls: t.pnl >= 0 ? "up" : "down" }]));
+
+  document.getElementById("strategy-title").textContent = strat ? `Strategy v${strat.version}` : "Strategy";
+  document.getElementById("strategy-sub").textContent = `${a.asset} · score ${a.score.toFixed(3)} on a −1 to +1 scale`;
+  const params = document.getElementById("params");
+  params.replaceChildren();
+  if (strat) {
+    const rows = [
+      ["Indicator", strat.entry.indicator.toUpperCase()], ["Direction", strat.entry.direction],
+      ["Entry threshold", strat.entry.threshold], ["Stop loss", strat.stop_loss_pct + "%"],
+      ["Risk per trade", strat.position_size_r + "% of equity"], ["Take profit", (strat.take_profit_r ?? 2) + "× stop distance"],
+      ["Realized return", pct(a.metrics.realised_return * 100, 3)], ["Max drawdown", (a.metrics.max_drawdown * 100).toFixed(2) + "%"],
+      ["Sharpe", a.metrics.n >= 2 ? a.metrics.sharpe.toFixed(2) : "needs 2+ trades"],
+    ];
+    for (const [k, v] of rows) params.append(el("dt", {}, k), el("dd", {}, String(v)));
+  }
+  const hist = document.getElementById("history");
+  hist.replaceChildren();
+  if (!a.hypotheses.length) {
+    const left = Math.max(0, state.goal.reflection_every - a.trades.length);
+    hist.append(el("li", {}, left ? `No changes yet — first reflection after ${left} more closed trade${left > 1 ? "s" : ""}.` : "No changes yet — due at the next reflection."));
+  }
+  for (const h of a.hypotheses.slice().reverse()) {
+    const li = el("li");
+    li.append(el("div", { class: "what" }, `v${h.from_version} → v${h.to_version} · ${h.variable} ${h.old_value} → ${h.new_value}${h.clamped ? ` (asked ${h.requested_value}, capped)` : ""}`),
+      el("div", { class: "muted" }, `${h.mode === "hermes" ? "Hermes" : "Fallback rule"} · ${dateTimeFmt(Date.parse(h.ts))}`),
+      el("div", { class: "why" }, h.rationale || ""));
+    hist.append(li);
+  }
+  document.getElementById("footer").textContent =
+    `Paper trading only · crypto fills simulated, stock fills from the Alpaca paper account · positions and trades from the Railway volume (synced ${ago(state.pulled_at)}) · prices live from the exchange, refreshed every minute`;
+}
+
+function render() {
+  if (!state || !state.ready) return;
+  if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];
+  document.getElementById("content").hidden = false;
+  renderHeader(); renderTiles(); renderReturns(); renderCards(); renderDetail();
+  document.getElementById("returns-table").hidden = !tableOpen.returns;
+  document.getElementById("price-table").hidden = !tableOpen.price;
+}
+
+// ---------- data ----------
+async function loadState() {
+  try {
+    const r = await fetch("/api/state");
+    const s = await r.json();
+    if (!r.ok) throw new Error(s.error || r.statusText);
+    if (!s.ready) {
+      const b = document.getElementById("banner");
+      b.textContent = s.sync && s.sync.error ? "Sync failed: " + s.sync.error : "Pulling state from Railway… the first sync takes a minute or two.";
+      b.classList.add("show");
+      document.getElementById("synced").textContent = "Syncing from Railway…";
+      return s;
+    }
+    state = s; render();
+    return s;
+  } catch (e) {
+    const b = document.getElementById("banner");
+    b.textContent = "Couldn't read dashboard data (" + e.message + ") — showing the last loaded view.";
+    b.classList.add("show");
+    return null;
+  }
+}
+async function loadCandles() {
+  if (!state) return;
+  await Promise.all(state.goal.assets.map(async (asset) => {
+    try {
+      const r = await fetch("/api/candles?asset=" + encodeURIComponent(asset));
+      const c = await r.json();
+      if (r.ok) candles[asset] = c;
+    } catch (_) { /* keep previous candles */ }
+  }));
+  render();
+}
+let syncPoll = null;
+async function watchSync() {
+  clearInterval(syncPoll);
+  syncPoll = setInterval(async () => {
+    const s = await loadState();
+    if (s && s.sync && !s.sync.running) { clearInterval(syncPoll); if (!Object.keys(candles).length) loadCandles(); }
+  }, 3000);
+}
+document.getElementById("sync-btn").addEventListener("click", async () => {
+  document.getElementById("sync-btn").disabled = true;
+  document.getElementById("synced").textContent = "Syncing from Railway…";
+  await fetch("/api/sync", { method: "POST" });
+  watchSync();
+});
+document.querySelectorAll("[data-table]").forEach((b) => b.addEventListener("click", () => {
+  const k = b.dataset.table; tableOpen[k] = !tableOpen[k];
+  b.textContent = tableOpen[k] ? "Chart only" : "Table"; render();
+}));
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+(async function boot() {
+  const s = await loadState();
+  if (!s || !s.ready || (s.sync && s.sync.running)) watchSync();
+  await loadCandles();
+  setInterval(loadState, 30000);
+  setInterval(loadCandles, 60000);
+})();
+</script>
+</body>
+</html>
