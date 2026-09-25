@@ -24,6 +24,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config
@@ -50,7 +51,12 @@ def railway_cmd() -> list[str]:
 def _volume_files(*args: str) -> str:
     volume = config.env("RAILWAY_VOLUME", "hermes-trading-volume")
     cmd = [*railway_cmd(), "volume", "files", "--volume", volume, *args]
-    proc = subprocess.run(cmd, cwd=config.ROOT, capture_output=True, text=True, encoding="utf-8")
+    # Railway's API drops connections now and then; retry those instead of failing the whole sync
+    for attempt in range(4):
+        proc = subprocess.run(cmd, cwd=config.ROOT, capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode == 0 or "connection error" not in (proc.stderr or proc.stdout):
+            break
+        time.sleep(2 ** attempt)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()[-500:]
         raise SystemExit(f"railway volume files {' '.join(args)} failed:\n{detail}")
