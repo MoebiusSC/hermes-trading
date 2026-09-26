@@ -16,6 +16,8 @@ assets:                      # each gets its own strategy, paper account and ref
   - "GLD"
   - "TLT"
   - "USO"
+  - "SECZ"
+  - "VOO"
 stock_equity_per_asset: 200  # virtual account per stock; together within the $1,000 Alpaca balance
 stock_equity_overrides:      # accounts opened under the earlier $500 default
   SPY: 500
