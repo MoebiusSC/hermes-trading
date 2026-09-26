@@ -214,6 +214,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             pending = "entry"
     if pos:  # mark an open position to the last close, as a trade, so its loss or gain counts
         close_at(rules.fill(c[-1], sell_side, slippage), t[-1] + tfe, "end_of_test")
+        equity_curve.append({"ts": _iso(t[-1] + tfe), "equity": float(equity)})
     return {"trades": trades, "bars": n, "in_market_pct": in_market / max(1, n - warmup) * 100,
             "final_equity": equity, "start_equity": start_equity, "equity_curve": equity_curve}
 
