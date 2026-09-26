@@ -11,7 +11,6 @@ from . import config
 from .storage import load_yaml, read_jsonl
 
 SHARPE_MIN_SPAN_DAYS = 30  # annualise over at least the goal horizon so tiny samples don't explode
-MIN_OOS_TRADES = 20       # minimum OOS trades required before an automatic change can be trusted
 
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -34,10 +33,11 @@ def _curve_metrics(equity_curve: list[dict]) -> tuple[float, float, float]:
     sharpe = 0.0
     if len(returns) >= 2:
         std = returns.std(ddof=1)
-        deltas = np.asarray([(b-a).total_seconds() for (a,_),(b,_) in zip(points, points[1:])])
-        deltas = deltas[deltas > 0]
-        if std > 0 and len(deltas):
-            periods_per_year = 365.25 * 86400 / float(np.median(deltas))
+        # Annualise by the bars actually observed per calendar year, so stocks (bars only in market
+        # hours) aren't scaled as if they traded around the clock like crypto.
+        years = (points[-1][0] - points[0][0]).total_seconds() / (365.25 * 86400)
+        if std > 0 and years > 0:
+            periods_per_year = len(returns) / years
             sharpe = float(returns.mean() / std * math.sqrt(periods_per_year))
     return float(values[-1] / values[0] - 1.0), max_dd, sharpe
 

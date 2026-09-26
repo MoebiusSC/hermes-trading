@@ -66,6 +66,11 @@ MAX_STEP = {
 CHOICES = {"entry.direction": ("long", "short"), "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
 AUTO_MODES = ("hermes", "llm", "fallback", "revert")  # changes the reflection made (not manual/migration)
 REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
+# Backtest validation of a hypothesis. With the 15m strategy, 90 days leaves 4-16 out-of-sample trades
+# per asset (median ~10); fewer than MIN_OOS_TRADES is too thin to trust either way.
+VALIDATION_DAYS = 90
+MIN_OOS_TRADES = 6
+DUPLICATE_LOOKBACK = 10  # don't re-test a value already tried in the asset's last N hypotheses
 HERMES_TRADE_WINDOW = 25
 DEFAULT_HERMES_CMD = (
     "hermes chat -Q --oneshot -t todo --ignore-rules --source tool --max-turns 3 --run-budget 300"
@@ -450,7 +455,7 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     baseline = None
     if validate:
         try:
-            baseline = backtest.run(asset, strategy, goal)
+            baseline = backtest.run(asset, strategy, goal, VALIDATION_DAYS)
         except Exception as e:  # no history (new listing, data outage): decide without it
             baseline = {"error": f"{type(e).__name__}: {e}"[:200]}
     bt_ok = baseline if baseline and "error" not in baseline else None
@@ -462,6 +467,9 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
         hyp = fallback_hypothesis(strategy, goal, m)
     if hyp is None:
         return f"targets met (score {s}) — no change this cycle."
+    if _recent_duplicate(hypotheses, hyp["variable"], _bounded(strategy, hyp)):
+        # logged as rejected so the cadence restarts instead of asking the same question every cycle
+        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "duplicate"}, rejected=True)
     if not validate:
         return Proposal(paths, strategy, hyp, m, s)
     if not bt_ok:
@@ -470,7 +478,7 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     candidate_strategy = copy.deepcopy(strategy)
     set_path(candidate_strategy, hyp["variable"], _bounded(strategy, hyp))
     try:
-        candidate = backtest.run(asset, candidate_strategy, goal)
+        candidate = backtest.run(asset, candidate_strategy, goal, VALIDATION_DAYS)
     except Exception as e:
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
     b, c = _bt_brief(bt_ok), _bt_brief(candidate)
@@ -531,7 +539,9 @@ def apply_proposal(p: Proposal, mode: str) -> str:
             return f"rejected: {r['variable']} {r['old_value']} → {r['new_value']} ({(p.backtest or {}).get('reason', verdict or 'validation failed')})"
         c, b = p.backtest["candidate"], p.backtest["baseline"]
         return (f"rejected by backtest: {r['variable']} {r['old_value']} → {r['new_value']} "
-                f"(OOS trades={c['oos_n']}, score {b['oos_score']:+.2f} → {c['oos_score']:+.2f})")
+                f"(OOS trades={c['oos_n']}, score {b['oos_score']:+.2f} → {c['oos_score']:+.2f}, "
+                f"whole period {b['all_score']:+.2f} → {c['all_score']:+.2f})"
+                + (f" — fewer than {MIN_OOS_TRADES} out-of-sample trades" if p.backtest.get("reason") == "insufficient_oos_trades" else ""))
 
     record = apply(p.paths, p.strategy, p.hyp, mode, p.m, p.s, backtest=p.backtest, unclamped=mode == "revert")
     if record is None:

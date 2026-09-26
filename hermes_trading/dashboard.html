@@ -543,8 +543,11 @@ const REFLECT_REPORTS = [
   [/^strategy changed while reflecting — retrying next cycle\.$/, "La estrategia cambió durante la reflexión: se reintenta"],
   [/^(\S+) is already at (.+) or its bound — no change\.$/, "$1 ya está en $2 o en su límite: sin cambios"],
   [/^FAILED — (.*)$/, "Error: $1"],
-  [/^rejected by backtest: (\S+) (\S+) → (\S+) \(out-of-sample score (\S+) → (\S+), whole period (\S+) → (\S+)\)$/,
-    "Rechazado por backtest: $1 $2 → $3 (fuera de muestra $4 → $5, periodo completo $6 → $7)"],
+  [/^rejected by backtest: (\S+) (\S+) → (\S+) \(OOS trades=(\d+), score (\S+) → (\S+), whole period (\S+) → (\S+)\) — fewer than (\d+) out-of-sample trades$/,
+    "Rechazado: $1 $2 → $3 (solo $4 operaciones fuera de muestra, mínimo $9)"],
+  [/^rejected by backtest: (\S+) (\S+) → (\S+) \(OOS trades=(\d+), score (\S+) → (\S+), whole period (\S+) → (\S+)\)$/,
+    "Rechazado por backtest: $1 $2 → $3 (fuera de muestra $5 → $6 con $4 operaciones; periodo completo $7 → $8)"],
+  [/^rejected: (\S+) (\S+) → (\S+) \(duplicate\)$/, "Descartado: $1 $2 → $3 ya se probó hace poco"],
 ];
 function reportEs(text) {
   for (const [re, out] of REFLECT_REPORTS) if (re.test(text)) return text.replace(re, out);
@@ -1594,7 +1597,10 @@ async function saveSettings(asset, saved, btn) {
 // ================= Estrategia e IA =================
 function evalChip(h) {
   const ev = h.evaluation || {};
-  if (h.rejected || ev.status === "rejected") return el("span", { class: "chip bad" }, "rechazado por backtest");
+  if (h.rejected || ev.status === "rejected") {
+    const reason = (h.backtest || {}).reason;
+    return el("span", { class: "chip bad" }, reason === "duplicate" ? "ya probado" : reason === "insufficient_oos_trades" ? "pocos datos fuera de muestra" : "rechazado por backtest");
+  }
   if (ev.status === "done") return el("span", { class: "chip " + (ev.improved ? "good" : "bad") }, ev.improved ? "mejoró" : "empeoró");
   if (ev.status === "pending") return el("span", { class: "chip pending" }, `midiendo ${ev.n_after}/${ev.needed}`);
   return el("span", { class: "chip pending" }, "sin datos suficientes");
@@ -1651,7 +1657,7 @@ function renderEstrategia() {
     sub.textContent = `Cada ${Math.round((r.every_s || 1800) / 60)} minutos el worker revisa cada activo; si juntó ${state.goal.reflection_every} operaciones cerradas nuevas, revierte el último cambio si empeoró o ${MODE_LABEL[r.mode] || r.mode} propone cambiar una sola variable, que se valida con backtest.`;
     const reports = Object.entries(r.reports || {});
     const changed = reports.filter(([, t]) => /^v\d+ → v\d+/.test(t)).length, failed = reports.filter(([, t]) => t.startsWith("FAILED")).length;
-    const rejectedNow = reports.filter(([, t]) => t.startsWith("rejected by backtest")).length;
+    const rejectedNow = reports.filter(([, t]) => t.startsWith("rejected")).length;
     kp.append(kpi("Modo", MODE_LABEL[r.mode] || r.mode), kpi("Último ciclo", r.ts ? timeFmt(Date.parse(r.ts)) : "—", "", ago(r.ts)),
       kpi("Próximo ciclo", next ? timeFmt(next) : "—", "", next ? until(next) : ""),
       kpi("Cambios en el último ciclo", String(changed)), kpi("Rechazados", String(rejectedNow)), kpi("Errores", String(failed + (r.error ? 1 : 0)), failed || r.error ? "down" : ""));
