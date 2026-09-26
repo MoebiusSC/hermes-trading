@@ -2,10 +2,14 @@
 
   python -m hermes_trading.reflect --fallback   deterministic rule (no Hermes needed)
   python -m hermes_trading.reflect --hermes     ask the `hermes` CLI for a hypothesis
+  python -m hermes_trading.reflect --llm        ask an OpenAI-compatible API directly (LLM_API_KEY)
 
 Runs every asset in goal.yaml (or just --asset X). Each asset has its own strategy, trades and
 cadence. Add --force to reflect before `reflection_every` new trades have closed.
 The Hermes command is DEFAULT_HERMES_CMD + `--query-file <prompt>`; override the base with HERMES_CMD.
+--llm sends the same prompt to LLM_BASE_URL's /chat/completions with LLM_MODEL (default: Gemini's
+free tier). It is what the Railway worker uses: the `hermes` CLI only signs in interactively,
+which a server can't do.
 """
 from __future__ import annotations
 
@@ -19,7 +23,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+from typing import NamedTuple
+
+import httpx
 
 from . import config
 from .score import metrics, score
@@ -44,6 +52,11 @@ HERMES_TRADE_WINDOW = 25
 DEFAULT_HERMES_CMD = (
     "hermes chat -Q --oneshot -t todo --ignore-rules --source tool --max-turns 3 --run-budget 300"
 )
+# Gemini's OpenAI-compatible endpoint; any other (OpenRouter, Groq, ...) works via LLM_BASE_URL
+DEFAULT_LLM_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+DEFAULT_LLM_MODEL = "gemini-3.8-flash"
+LLM_RETRIES = 4
+MODES = ("hermes", "llm", "fallback")
 
 
 def get_path(d: dict, dotted: str):
@@ -157,6 +170,36 @@ def hermes_hypothesis(
     return hyp
 
 
+def llm_hypothesis(
+    asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float
+) -> dict:
+    key = config.env("LLM_API_KEY")
+    if not key:
+        raise RuntimeError("LLM_API_KEY is not set — create a free key at aistudio.google.com or use --fallback.")
+    url = config.env("LLM_BASE_URL", DEFAULT_LLM_BASE_URL).rstrip("/") + "/chat/completions"
+    body = {
+        "model": config.env("LLM_MODEL", DEFAULT_LLM_MODEL),
+        "messages": [{"role": "user", "content": build_prompt(asset, strategy, goal, trades, m, s)}],
+    }
+    # Free tiers allow a few requests per minute: wait out 429s (and gateway blips) and retry;
+    # anything else fails the asset.
+    for attempt in range(LLM_RETRIES):
+        r = httpx.post(url, json=body, headers={"Authorization": f"Bearer {key}"}, timeout=180)
+        if r.status_code not in (429, 500, 502, 503, 504) or attempt == LLM_RETRIES - 1:
+            break
+        try:
+            wait = float(r.headers.get("retry-after", ""))
+        except ValueError:
+            wait = 15 * 2**attempt
+        time.sleep(min(wait, 120))
+    if r.status_code != 200:
+        raise RuntimeError(f"LLM API returned {r.status_code}: {r.text.strip()[-300:]}")
+    hyp = parse_hypothesis(r.json()["choices"][0]["message"]["content"] or "")
+    hyp.setdefault("rationale", "")
+    hyp.setdefault("predicted_direction", "up")
+    return hyp
+
+
 def apply(
     paths: config.AssetPaths, strategy: dict, hyp: dict, mode: str, m: dict, s: float
 ) -> dict | None:
@@ -260,8 +303,17 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[d
     return records
 
 
-def reflect_asset(asset: str, goal: dict, hermes: bool, force: bool) -> str:
-    """One reflection cycle for one asset; returns a one-line report."""
+class Proposal(NamedTuple):
+    paths: config.AssetPaths
+    strategy: dict  # the strategy the hypothesis was built from
+    hyp: dict
+    m: dict
+    s: float
+
+
+def propose(asset: str, goal: dict, mode: str, force: bool) -> Proposal | str:
+    """Read an asset's state and ask for one change. Returns a one-line report when there's
+    nothing to apply. Writes nothing, so it can run while the worker trades."""
     paths = config.asset_paths(asset)
     if not paths.strategy.exists():
         return "no state yet — worker hasn't started this asset."
@@ -277,20 +329,32 @@ def reflect_asset(asset: str, goal: dict, hermes: bool, force: bool) -> str:
 
     m = metrics(trades)
     s = score(trades, goal)
-    if hermes:
+    if mode == "hermes":
         hyp = hermes_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s)
+    elif mode == "llm":
+        hyp = llm_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s)
     else:
         hyp = fallback_hypothesis(strategy, goal, m)
     if hyp is None:
         return f"targets met (score {s}) — no change this cycle."
-    record = apply(paths, strategy, hyp, "hermes" if hermes else "fallback", m, s)
+    return Proposal(paths, strategy, hyp, m, s)
+
+
+def apply_proposal(p: Proposal, mode: str) -> str:
+    record = apply(p.paths, p.strategy, p.hyp, mode, p.m, p.s)
     if record is None:
-        return f"{hyp['variable']} is already at {hyp['new_value']} or its bound — no change."
+        return f"{p.hyp['variable']} is already at {p.hyp['new_value']} or its bound — no change."
     clamp_note = f" [requested {record['requested_value']}, clamped to max step]" if record["clamped"] else ""
     return (
         f"v{record['from_version']} → v{record['to_version']}: {record['variable']} "
         f"{record['old_value']} → {record['new_value']}{clamp_note}  ({record['rationale']})"
     )
+
+
+def reflect_asset(asset: str, goal: dict, mode: str, force: bool) -> str:
+    """One reflection cycle for one asset; returns a one-line report."""
+    p = propose(asset, goal, mode, force)
+    return p if isinstance(p, str) else apply_proposal(p, mode)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,16 +363,18 @@ def main(argv: list[str] | None = None) -> int:
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--fallback", action="store_true", help="deterministic rule")
     which.add_argument("--hermes", action="store_true", help="ask Hermes for the hypothesis")
+    which.add_argument("--llm", action="store_true", help="ask an OpenAI-compatible API (LLM_API_KEY)")
     parser.add_argument("--force", action="store_true", help="ignore reflection_every cadence")
     parser.add_argument("--asset", help="reflect on only this asset (default: all in goal.yaml)")
     args = parser.parse_args(argv)
 
     goal = load_yaml(config.GOAL_FILE)
     assets = [args.asset] if args.asset else config.goal_assets(goal)
+    mode = next(m for m in MODES if getattr(args, m))
     failed = False
     for asset in assets:
         try:
-            report = reflect_asset(asset, goal, args.hermes, args.force)
+            report = reflect_asset(asset, goal, mode, args.force)
         except Exception as e:  # one asset's failure must not block the others
             failed = True
             report = f"FAILED — {type(e).__name__}: {e}"

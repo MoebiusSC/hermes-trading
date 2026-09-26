@@ -1,6 +1,10 @@
 """24/7 reliability loop: every minute, for each asset, pull data, evaluate that asset's
 strategy.yaml, paper trade, log. One heartbeat covers all assets.
 
+With HERMES_REFLECT=llm|hermes|fallback the worker also runs the reflection cycle itself every
+HERMES_REFLECT_EVERY_S seconds (default 1800), writing straight to its own state — the same job
+the local scheduled task did through remote.py, without the pull/push round trip.
+
 Crypto pairs (BTC/USDT) are simulated fills at the last price. Stocks/ETFs (SPY) are real
 orders in the Alpaca *paper* account, traded only during market hours."""
 from __future__ import annotations
@@ -36,6 +40,7 @@ RETRIES = 3
 BREAKER_THRESHOLD = 5  # consecutive failed ticks before an adapter is benched
 BREAKER_COOLDOWN_S = 300
 TICK_S = 60
+REFLECT_EVERY_S = 1800
 START_EQUITY = config.CRYPTO_START_EQUITY  # per crypto asset
 RSI_PERIOD = 14
 RSI_EXIT = {"long": 70.0, "short": 30.0}
@@ -466,6 +471,7 @@ class Worker:
     def __init__(self, assets: list[str], goal: dict) -> None:
         self.books = [make_book(asset, goal) for asset in assets]
         self.loop: asyncio.AbstractEventLoop | None = None  # set in run(); the state server posts actions to it
+        self.reflection: dict = {}  # last reflection cycle, reported in the heartbeat
 
     def book(self, asset: str) -> AssetBook:
         for book in self.books:
@@ -495,10 +501,61 @@ class Worker:
         return message
 
     def _heartbeat(self, state: str, assets: dict | None = None, **fields) -> None:
+        if self.reflection:
+            fields.setdefault("reflection", self.reflection)
         write_json(
             config.HEARTBEAT_FILE,
             {"ts": utcnow(), "state": state, "mode": "paper", **fields, "assets": assets or {}},
         )
+
+    # --- reflection ----------------------------------------------------------
+
+    async def _reflect_book(self, book: AssetBook, goal: dict, mode: str) -> str:
+        # The model call runs in a thread without the book's lock, so ticks keep trading;
+        # only the write takes the lock, and it gives up if the strategy moved meanwhile.
+        proposal = await asyncio.to_thread(reflect.propose, book.asset, goal, mode, False)
+        if isinstance(proposal, str):
+            return proposal
+        async with book.lock:
+            current = load_yaml(book.paths.strategy)
+            if str(current.get("version")) != str(proposal.strategy.get("version")):
+                return "strategy changed while reflecting — retrying next cycle."
+            return reflect.apply_proposal(proposal, mode)
+
+    async def reflect_once(self, mode: str) -> None:
+        goal = load_yaml(config.GOAL_FILE)  # re-read: the dashboard may have changed it
+        reports = {}
+        for book in list(self.books):  # one at a time, like the local task did
+            try:
+                reports[book.asset] = await self._reflect_book(book, goal, mode)
+            except Exception as e:  # one asset's failure must not block the others
+                reports[book.asset] = f"FAILED — {type(e).__name__}: {e}"[:300]
+            console.log(f"[magenta]reflect[/] {book.asset}: {reports[book.asset]}")
+        self.reflection = {"ts": utcnow(), "mode": mode, "reports": reports}
+
+    async def reflect_forever(self, mode: str, every_s: float) -> None:
+        console.print(f"[bold]Reflection on[/] mode={mode} every {every_s:g}s")
+        while True:
+            started = time.monotonic()
+            try:
+                await self.reflect_once(mode)
+            except Exception as e:  # e.g. goal.yaml unreadable; try again next cycle
+                console.log(f"[red]reflection cycle failed:[/] {type(e).__name__}: {e}")
+                self.reflection = {"ts": utcnow(), "mode": mode, "error": f"{type(e).__name__}: {e}"[:300]}
+            await asyncio.sleep(max(0.0, every_s - (time.monotonic() - started)))
+
+    def _reflect_settings(self) -> tuple[str, float] | None:
+        mode = config.env("HERMES_REFLECT", "off").lower()
+        if mode == "off":
+            return None
+        if mode not in reflect.MODES:
+            console.print(f"[red]HERMES_REFLECT={mode!r} not understood[/] (off, {', '.join(reflect.MODES)}) — reflection off.")
+            return None
+        if mode == "llm" and not config.env("LLM_API_KEY"):
+            console.print("[red]HERMES_REFLECT=llm but LLM_API_KEY is not set[/] — reflection off.")
+            self.reflection = {"ts": utcnow(), "mode": mode, "error": "LLM_API_KEY is not set"}
+            return None
+        return mode, float(config.env("HERMES_REFLECT_EVERY_S", str(REFLECT_EVERY_S)))
 
     async def tick(self) -> None:
         summaries = await asyncio.gather(*(book.tick() for book in self.books))
@@ -519,6 +576,8 @@ class Worker:
         self.loop = asyncio.get_running_loop()
         names = ", ".join(book.asset for book in self.books)
         console.print(f"[bold]Booting hermes-trading worker[/] assets={names} mode=paper")
+        settings = None if once else self._reflect_settings()
+        reflector = asyncio.create_task(self.reflect_forever(*settings)) if settings else None
         try:
             while True:
                 started = time.monotonic()
@@ -534,5 +593,7 @@ class Worker:
                     return
                 await asyncio.sleep(max(0.0, TICK_S - (time.monotonic() - started)))
         finally:
+            if reflector:
+                reflector.cancel()
             await price.close()
             await alpaca.close()

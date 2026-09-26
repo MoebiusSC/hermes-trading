@@ -1081,7 +1081,7 @@ function renderDetail() {
   for (const h of a.hypotheses.slice().reverse()) {
     const li = el("li");
     li.append(el("div", { class: "what" }, `v${h.from_version} → v${h.to_version} · ${h.variable} ${h.old_value} → ${h.new_value}${h.clamped ? ` (pedido ${h.requested_value}, limitado)` : ""}`),
-      el("div", { class: "muted" }, `${{ hermes: "Hermes", manual: "Manual (dashboard)" }[h.mode] || "Regla de respaldo"} · ${dateTimeFmt(Date.parse(h.ts))}`),
+      el("div", { class: "muted" }, `${{ hermes: "Hermes", llm: "IA (Gemini)", manual: "Manual (dashboard)" }[h.mode] || "Regla de respaldo"} · ${dateTimeFmt(Date.parse(h.ts))}`),
       el("div", { class: "why" }, h.rationale || ""));
     hist.append(li);
   }

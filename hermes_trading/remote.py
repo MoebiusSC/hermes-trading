@@ -5,6 +5,10 @@
   python -m hermes_trading.remote push-goal            local state/goal.yaml → volume (then redeploy)
   python -m hermes_trading.remote reflect --fallback   pull, reflect every asset, push the ones that changed
   python -m hermes_trading.remote reflect --hermes     same, with Hermes proposing the changes
+  python -m hermes_trading.remote reflect --llm        same, calling an LLM API directly (Gemini)
+
+The deployed worker can run this cycle itself (HERMES_REFLECT, see loop.py); then there is no
+need to run `reflect` from here, and doing both would reflect twice on the same trades.
 
 The worker re-reads each asset's strategy.yaml every tick, so a push takes effect within a
 minute; no redeploy. goal.yaml (the asset list) is read at boot, so push-goal needs a redeploy.
@@ -189,13 +193,13 @@ def _due_assets() -> list[str]:
     return due
 
 
-def reflect(hermes: bool, force: bool) -> int:
+def reflect(mode: str, force: bool) -> int:
     pull()
     if not force and not _due_assets():
         print("No asset has enough new closed trades — skipping reflection.", flush=True)
         return 0
     before = _strategies()
-    cmd = [sys.executable, "-m", "hermes_trading.reflect", "--hermes" if hermes else "--fallback"]
+    cmd = [sys.executable, "-m", "hermes_trading.reflect", f"--{mode}"]
     if force:
         cmd.append("--force")
     env = {**os.environ, "HERMES_TRADING_STATE": str(REMOTE_DIR)}
@@ -221,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     which = r.add_mutually_exclusive_group(required=True)
     which.add_argument("--fallback", action="store_true")
     which.add_argument("--hermes", action="store_true")
+    which.add_argument("--llm", action="store_true")
     r.add_argument("--force", action="store_true", help="ignore reflection_every cadence")
     args = parser.parse_args(argv)
 
@@ -231,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "push-goal":
         push_goal()
     else:
-        return reflect(args.hermes, args.force)
+        return reflect(next(m for m in reflection.MODES if getattr(args, m)), args.force)
     return 0
 
 

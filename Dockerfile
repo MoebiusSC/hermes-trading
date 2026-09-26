@@ -9,4 +9,6 @@ COPY state ./state
 COPY state ./state_seed
 RUN uv sync --frozen
 ENV HERMES_TRADING_MODE=paper
+# Reflect in-process every 30 min via Gemini (free tier); needs LLM_API_KEY set on the service
+ENV HERMES_REFLECT=llm
 CMD ["uv", "run", "python", "-m", "hermes_trading.run"]
