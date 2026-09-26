@@ -77,6 +77,23 @@ button[disabled] { opacity: .6; cursor: default; }
 .kpis .label { color: var(--text-secondary); font-size: 12px; }
 .kpis .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .kpis .note { color: var(--text-muted); font-size: 12px; }
+.actions-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-top: 12px; }
+.actions-grid > * { min-width: 0; }
+td.act { text-align: right; padding-right: 0; }
+td.act button { padding: 3px 12px; font-size: 13px; }
+button.danger { color: var(--delta-down); border-color: color-mix(in srgb, var(--delta-down) 45%, transparent); }
+button.danger:hover { background: color-mix(in srgb, var(--delta-down) 8%, transparent); }
+form.add { display: grid; gap: 10px; margin-top: 8px; }
+form.add .row { display: flex; gap: 8px; flex-wrap: wrap; }
+form.add select, form.add input[type=text] {
+  font: inherit; color: var(--text-primary); background: var(--page); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; min-width: 0;
+}
+form.add input[type=text] { flex: 1; text-transform: uppercase; }
+form.add input[type=text]::placeholder { text-transform: none; }
+form.add label.check { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 13px; }
+.result { font-size: 13px; color: var(--text-secondary); min-height: 1.4em; }
+.result.err { color: var(--delta-down); }
 .legend .perf { font-variant-numeric: tabular-nums; margin-left: 4px; }
 .chart-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
 .chart-head .spacer { flex: 1; }
@@ -114,7 +131,7 @@ button[disabled] { opacity: .6; cursor: default; }
 .detail > .stack { display: grid; gap: 12px; align-content: start; }
 .grid-tiles > *, .cards > *, .detail > *, .stack > * { min-width: 0; }
 @media (max-width: 860px) {
-  .detail, .split { grid-template-columns: 1fr; }
+  .detail, .split, .actions-grid { grid-template-columns: 1fr; }
   .grid-tiles { grid-template-columns: 1fr 1fr; }
   .tile.hero { grid-column: 1 / -1; }
   .tile.hero .value { font-size: 40px; }
@@ -181,6 +198,31 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
         <div class="legend" id="stock-legend"></div>
         <div class="chart" id="stock-chart"></div>
         <div class="table-wrap" id="stock-table" hidden></div>
+      </section>
+    </div>
+
+    <div class="actions-grid">
+      <section class="panel">
+        <h2>Open positions</h2>
+        <div class="sub">Sell closes the position at the current price and returns the proceeds to that asset's paper account. ETFs sell at Alpaca during market hours.</div>
+        <div class="table-wrap" id="positions-table"></div>
+        <div class="result" id="sell-result" role="status"></div>
+      </section>
+      <section class="panel">
+        <h2>Add asset</h2>
+        <div class="sub">Starts trading it with the default strategy. Crypto gets a $10,000 paper account, ETFs <span id="stock-equity">$200</span>.</div>
+        <form class="add" id="add-form">
+          <div class="row">
+            <select id="add-kind" aria-label="Asset type">
+              <option value="crypto">Crypto (vs USDT)</option>
+              <option value="stock">ETF / stock</option>
+            </select>
+            <input type="text" id="add-symbol" placeholder="e.g. DOT or IWM" aria-label="Symbol" required maxlength="20" autocomplete="off">
+          </div>
+          <label class="check"><input type="checkbox" id="add-buy" checked> Buy now at market (strategy position size)</label>
+          <div class="row"><button type="submit" id="add-btn">Add asset</button></div>
+          <div class="result" id="add-result" role="status"></div>
+        </form>
       </section>
     </div>
 
@@ -602,6 +644,80 @@ function renderReturns(kind) {
   table(document.getElementById(kind + "-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
 }
 
+function renderPositions() {
+  const host = document.getElementById("positions-table");
+  const open = state.assets.filter((a) => a.paper.position);
+  document.getElementById("stock-equity").textContent = usd(state.goal.stock_equity_per_asset || 500, 0);
+  if (!open.length) { host.replaceChildren(el("div", { class: "empty muted" }, "No open positions.")); return; }
+  const t = el("table"), head = el("tr");
+  for (const h of ["Asset", "Entry", "Now", "Qty", "Value", "Unrealized", ""]) head.append(el("th", {}, h));
+  t.append(el("thead")); t.firstChild.append(head);
+  const body = el("tbody");
+  for (const a of open) {
+    const pos = a.paper.position, last = lastPrice(a), u = unrealized(a);
+    const tr = el("tr");
+    tr.append(el("td", {}, `${a.asset}${pos.manual ? " · manual" : ""}`), el("td", {}, priceFmt(pos.entry_price)),
+      el("td", {}, last != null ? priceFmt(last) : "—"), el("td", {}, String(+pos.qty.toPrecision(6))),
+      el("td", {}, last != null ? usd(pos.qty * last) : "—"),
+      el("td", { class: u > 0 ? "up" : u < 0 ? "down" : "" }, signedUsd(u)));
+    const cell = el("td", { class: "act" });
+    const closed = a.kind === "stock" && a.tick && a.tick.market === "closed";
+    const btn = el("button", { type: "button", class: "danger" }, "Sell");
+    if (closed) { btn.disabled = true; btn.title = "Market closed — ETFs sell during market hours"; }
+    btn.addEventListener("click", () => sell(a.asset, btn));
+    cell.append(btn); tr.append(cell); body.append(tr);
+  }
+  t.append(body); host.replaceChildren(t);
+}
+
+function showResult(id, text, isError) {
+  const r = document.getElementById(id);
+  r.textContent = text; r.classList.toggle("err", !!isError);
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  let payload = {};
+  try { payload = await r.json(); } catch (_) { /* non-JSON error page */ }
+  if (!r.ok) throw new Error(payload.error || r.statusText);
+  return payload;
+}
+
+async function sell(asset, btn) {
+  if (!confirm(`Sell the open ${asset} position at market and return the proceeds to its paper account?`)) return;
+  btn.disabled = true; btn.textContent = "Selling…";
+  showResult("sell-result", `Selling ${asset}…`);
+  try {
+    const r = await postJSON("/api/sell", { asset });
+    showResult("sell-result", `${asset}: ${r.message}`);
+    watchSync();
+  } catch (e) {
+    showResult("sell-result", `${asset}: ${e.message}`, true);
+    btn.disabled = false; btn.textContent = "Sell";
+  }
+}
+
+document.getElementById("add-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const kind = document.getElementById("add-kind").value;
+  const symbol = document.getElementById("add-symbol").value.trim();
+  const buy = document.getElementById("add-buy").checked;
+  if (!symbol) return;
+  const btn = document.getElementById("add-btn");
+  btn.disabled = true; btn.textContent = "Adding…";
+  showResult("add-result", `Checking ${symbol.toUpperCase()} and adding it…`);
+  try {
+    const r = await postJSON("/api/add", { kind, symbol, buy });
+    showResult("add-result", r.message.replace(/^./, (x) => x.toUpperCase()));
+    document.getElementById("add-symbol").value = "";
+    watchSync();
+  } catch (e) {
+    showResult("add-result", e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = "Add asset";
+  }
+});
+
 function renderCards() {
   const host = document.getElementById("cards");
   host.replaceChildren();
@@ -721,7 +837,7 @@ function render() {
   if (!state || !state.ready) return;
   if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];
   document.getElementById("content").hidden = false;
-  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderCards(); renderDetail();
+  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderPositions(); renderCards(); renderDetail();
   document.getElementById("crypto-table").hidden = !tableOpen.crypto;
   document.getElementById("stock-table").hidden = !tableOpen.stock;
   document.getElementById("price-table").hidden = !tableOpen.price;

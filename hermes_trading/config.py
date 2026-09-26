@@ -98,6 +98,35 @@ def goal_assets(goal: dict) -> list[str]:
     return [str(a) for a in assets]
 
 
+def normalize_asset(raw: str, kind: str) -> str:
+    """User input to the goal.yaml form: crypto 'ada' -> 'ADA/USDT', ETF 'gld' -> 'GLD'."""
+    symbol = raw.strip().upper().replace("-", "/")
+    if kind == "crypto":
+        symbol = symbol if "/" in symbol else f"{symbol}/USDT"
+        if not all(part.isalnum() for part in symbol.split("/")) or symbol.count("/") != 1:
+            raise ValueError(f"{raw!r} doesn't look like a crypto symbol")
+        return symbol
+    if not symbol.isalnum() or len(symbol) > 6:
+        raise ValueError(f"{raw!r} doesn't look like a stock/ETF ticker")
+    return symbol
+
+
+def add_goal_asset(path: Path, asset: str) -> None:
+    """Append an asset to goal.yaml's `assets:` list, keeping the file's comments intact."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.startswith("assets:"))
+    end = start + 1
+    while end < len(lines) and lines[end].lstrip().startswith("- "):
+        end += 1
+    listed = {line.split("#")[0].strip().lstrip("- ").strip().strip("\"'") for line in lines[start + 1:end]}
+    if asset in listed:
+        return
+    lines.insert(end, f'  - "{asset}"\n')
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text("".join(lines), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def load_env(path: Path = ROOT / ".env") -> None:
     """Minimal .env reader. Real environment variables win over the file."""
     if not path.exists():

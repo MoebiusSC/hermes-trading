@@ -3,7 +3,11 @@
   POST /state   Authorization: Bearer $HERMES_STATE_TOKEN
                 body: {"have": {"<path relative to state/>": {"size": n, "sha256": hex}}}
 
-The reply lists every state file, sending only what the caller is missing:
+  POST /sell    {"asset": "BTC/USDT"}                  close that asset's position now
+  POST /add     {"asset": "ADA/USDT", "buy": true}     start trading an asset (optionally buy now)
+                Both reply {"message": "..."} or {"error": "..."}; same bearer token.
+
+/state lists every state file, sending only what the caller is missing:
   {"same": true}                    the caller's copy is identical
   {"append": "<text>"}              the caller's copy is a prefix (trades/hypotheses logs only grow)
   {"data": "<text>"}                anything else: the whole file
@@ -12,6 +16,7 @@ started only when HERMES_STATE_TOKEN is set. Railway routes the service's domain
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -22,6 +27,25 @@ from pathlib import Path
 from . import config
 
 MAX_BODY = 1_000_000
+ACTION_TIMEOUT_S = 90  # Alpaca fills and price fetches can take a while
+_worker = None  # set by attach(); actions run on the worker's event loop
+
+
+def attach(worker) -> None:
+    global _worker
+    _worker = worker
+
+
+def _run_action(path: str, body: dict) -> str:
+    worker = _worker
+    if worker is None or worker.loop is None:
+        raise RuntimeError("worker is still starting")
+    asset = str(body.get("asset") or "")
+    if path == "/sell":
+        coro = worker.book(asset).manual_sell()
+    else:
+        coro = worker.add_asset(asset, bool(body.get("buy")))
+    return asyncio.run_coroutine_threadsafe(coro, worker.loop).result(timeout=ACTION_TIMEOUT_S)
 
 
 def _sha(data: bytes) -> str:
@@ -73,7 +97,7 @@ def _handler(token: str):
                 self._send(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path != "/state":
+            if self.path not in ("/state", "/sell", "/add"):
                 return self._send(404, {"error": "not found"})
             sent = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
             if not hmac.compare_digest(sent.encode(), token.encode()):
@@ -82,8 +106,12 @@ def _handler(token: str):
             if length > MAX_BODY:
                 return self._send(413, {"error": "request too large"})
             try:
-                have = json.loads(self.rfile.read(length) or b"{}").get("have") or {}
-                self._send(200, {"files": diff(have)})
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/state":
+                    return self._send(200, {"files": diff(body.get("have") or {})})
+                self._send(200, {"message": _run_action(self.path, body)})
+            except ValueError as e:  # refused: unknown asset, market closed, no position…
+                self._send(400, {"error": str(e)[:300]})
             except Exception as e:
                 self._send(500, {"error": f"{type(e).__name__}: {e}"[:300]})
 

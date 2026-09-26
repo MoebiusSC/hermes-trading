@@ -86,7 +86,9 @@ def main(argv: list[str] | None = None) -> None:
     migrate_legacy_layout(assets[0])
     state_server.start()
     try:
-        _run(Worker(assets, goal).run(once=args.once))
+        worker = Worker(assets, goal)
+        state_server.attach(worker)
+        _run(worker.run(once=args.once))
     except KeyboardInterrupt:
         pass
     except SchemaError as e:

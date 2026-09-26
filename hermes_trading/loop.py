@@ -102,6 +102,7 @@ class AssetBook:
         self.paths = config.ensure_asset_state(asset)
         self.breakers = {name: Breaker() for name in self.ADAPTERS}
         self.paper = self._load_paper()
+        self.lock = asyncio.Lock()  # a tick and a manual buy/sell never interleave on one asset
 
     # --- paper account -------------------------------------------------------
 
@@ -245,6 +246,10 @@ class AssetBook:
 
     async def tick(self) -> dict:
         """Returns this asset's heartbeat section. Only SchemaError escapes."""
+        async with self.lock:
+            return await self._tick()
+
+    async def _tick(self) -> dict:
         summary: dict = {"start_equity": self.start_equity}
         try:
             strategy = load_yaml(self.paths.strategy)  # re-read so reflections apply without restart
@@ -278,6 +283,39 @@ class AssetBook:
     async def gate(self) -> dict | None:
         """Return a heartbeat section to skip this tick (e.g. market closed), or None to trade."""
         return None
+
+    # --- manual actions from the dashboard -----------------------------------
+
+    async def _quote(self) -> tuple[float, float]:
+        """Last price and RSI, for a manual action between ticks."""
+        data = await fetch_with_retry("price", self.ADAPTERS["price"], self.asset)
+        return data["last"], rsi(data["closes"])
+
+    async def manual_sell(self) -> str:
+        async with self.lock:
+            pos = self.paper["position"]
+            if not pos:
+                raise ValueError(f"{self.asset} has no open position")
+            return await self._manual_sell(pos)
+
+    async def _manual_sell(self, pos: dict) -> str:
+        last, rsi_value = await self._quote()
+        await self._record_close(last, "manual_close", rsi_value)
+        return f"closed {pos['direction']} @ {last:g} (simulated fill)"
+
+    async def manual_buy(self) -> str:
+        async with self.lock:
+            if self.paper["position"]:
+                raise ValueError(f"{self.asset} already has an open position")
+            strategy = load_yaml(self.paths.strategy)
+            self._check_strategy(strategy)
+            return await self._manual_buy(strategy)
+
+    async def _manual_buy(self, strategy: dict) -> str:
+        last, rsi_value = await self._quote()
+        self.paper["position"] = self._position(strategy, last, self._size(strategy, last), rsi_value, {}, manual=True)
+        self._save_paper()
+        return f"opened {strategy['entry']['direction']} @ {last:g} (simulated fill)"
 
 
 class StockBook(AssetBook):
@@ -328,7 +366,27 @@ class StockBook(AssetBook):
             return "no signal"
         return await self._buy(strategy, last, rsi_value, data)
 
-    async def _buy(self, strategy: dict, last: float, rsi_value: float, data: dict) -> str:
+    async def _require_open_market(self) -> None:
+        self.session = await alpaca.client().session()
+        if not self.session["is_open"]:
+            opens = self.session["next_open"][:16].replace("T", " ")
+            raise ValueError(f"market is closed — {self.asset} can be traded from {opens} ET")
+
+    async def _manual_sell(self, pos: dict) -> str:
+        await self._require_open_market()
+        _, rsi_value = await self._quote()
+        return await self._sell("manual_close", rsi_value)
+
+    async def _manual_buy(self, strategy: dict) -> str:
+        if strategy["entry"]["direction"] != "long":
+            raise ValueError("stocks are long-only here")
+        await self._require_open_market()
+        if await alpaca.client().position(self.asset) is not None:
+            raise ValueError(f"Alpaca already holds {self.asset} outside this worker")
+        last, rsi_value = await self._quote()
+        return await self._buy(strategy, last, rsi_value, {}, manual=True)
+
+    async def _buy(self, strategy: dict, last: float, rsi_value: float, data: dict, **extra) -> str:
         qty = math.floor(self._size(strategy, last) * 1e6) / 1e6
         if qty * last < MIN_ORDER_USD:
             return f"skip: order ${qty * last:.2f} is below Alpaca's ${MIN_ORDER_USD:.0f} minimum"
@@ -340,7 +398,7 @@ class StockBook(AssetBook):
             return f"entry rejected: {e.message}"[:200]
         fill, filled_qty = float(order["filled_avg_price"]), float(order["filled_qty"])
         self.paper["position"] = self._position(
-            strategy, fill, filled_qty, rsi_value, data, broker={"entry_order_id": order["id"], "client_order_id": client_id}
+            strategy, fill, filled_qty, rsi_value, data, broker={"entry_order_id": order["id"], "client_order_id": client_id}, **extra
         )
         self._save_paper()
         return f"opened long {filled_qty:g} @ {fill:.2f}"
@@ -381,6 +439,34 @@ def make_book(asset: str, goal: dict) -> AssetBook:
 class Worker:
     def __init__(self, assets: list[str], goal: dict) -> None:
         self.books = [make_book(asset, goal) for asset in assets]
+        self.loop: asyncio.AbstractEventLoop | None = None  # set in run(); the state server posts actions to it
+
+    def book(self, asset: str) -> AssetBook:
+        for book in self.books:
+            if book.asset == asset:
+                return book
+        raise ValueError(f"{asset} is not traded by this worker")
+
+    async def add_asset(self, asset: str, buy: bool) -> str:
+        """Start trading a new asset: check it has prices, record it in goal.yaml, open a book."""
+        asset = config.normalize_asset(asset, "stock" if config.is_stock(asset) else "crypto")
+        if any(book.asset == asset for book in self.books):
+            raise ValueError(f"{asset} is already traded")
+        adapter = stocks.fetch if config.is_stock(asset) else price.fetch
+        try:
+            await adapter(asset)
+        except Exception as e:
+            raise ValueError(f"no price data for {asset}: {e}"[:300]) from e
+        config.add_goal_asset(config.GOAL_FILE, asset)
+        book = make_book(asset, load_yaml(config.GOAL_FILE))
+        self.books.append(book)
+        message = f"added {asset} with a ${book.start_equity:,.0f} paper account"
+        if buy:
+            try:
+                message += "; " + await book.manual_buy()
+            except ValueError as e:
+                message += f"; not bought: {e}"
+        return message
 
     def _heartbeat(self, state: str, assets: dict | None = None, **fields) -> None:
         write_json(
@@ -404,6 +490,7 @@ class Worker:
                 )
 
     async def run(self, once: bool = False) -> None:
+        self.loop = asyncio.get_running_loop()
         names = ", ".join(book.asset for book in self.books)
         console.print(f"[bold]Booting hermes-trading worker[/] assets={names} mode=paper")
         try:

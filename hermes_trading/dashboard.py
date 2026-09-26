@@ -120,6 +120,36 @@ def build_state() -> dict:
     }
 
 
+# --- manual actions (forwarded to the worker's state server) -------------------------
+
+
+def worker_action(path: str, body: dict) -> tuple[int, dict]:
+    url, token = config.env("HERMES_STATE_URL"), config.env("HERMES_STATE_TOKEN")
+    if not url or not token:
+        return 503, {"error": "HERMES_STATE_URL / HERMES_STATE_TOKEN are not set in .env"}
+    try:
+        r = httpx.post(url.rstrip("/") + path, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=100)
+        payload = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        return 502, {"error": f"worker unreachable: {type(e).__name__}: {e}"[:300]}
+    if r.status_code == 200:
+        SYNC.start()  # show the result without waiting for the next auto-sync
+    return r.status_code, payload
+
+
+def add_asset(body: dict) -> tuple[int, dict]:
+    try:
+        asset = config.normalize_asset(str(body.get("symbol") or ""), "stock" if body.get("kind") == "stock" else "crypto")
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    code, payload = worker_action("/add", {"asset": asset, "buy": bool(body.get("buy"))})
+    local_goal = config.ROOT / "state" / "goal.yaml"
+    if code == 200 and asset not in config.goal_assets(load_yaml(local_goal)):
+        # keep the repo's goal.yaml in step, so a later `push-goal` doesn't drop the asset
+        config.add_goal_asset(local_goal, asset)
+    return code, payload
+
+
 # --- live candles ------------------------------------------------------------------
 
 _clients: dict = {}
@@ -252,9 +282,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._allowed():
             return self._send(403, b"forbidden", "text/plain")
-        if urlparse(self.path).path == "/api/sync":
+        path = urlparse(self.path).path
+        if path == "/api/sync":
             SYNC.start()
             return self._json(SYNC.status())
+        if path in ("/api/sell", "/api/add"):
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._json({"error": "invalid JSON"}, 400)
+            if path == "/api/sell":
+                code, payload = worker_action("/sell", {"asset": str(body.get("asset") or "")})
+            else:
+                code, payload = add_asset(body)
+            return self._json(payload, code)
         self._send(404, b"not found", "text/plain")
 
     def log_message(self, format, *args) -> None:  # keep the terminal quiet
