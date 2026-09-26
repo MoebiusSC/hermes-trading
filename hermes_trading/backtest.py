@@ -154,7 +154,6 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
                 trend_at[i] = bool(tc[j] > ema[j]) if p["direction"] == "long" else bool(tc[j] < ema[j])
 
     equity, pos, pending, trades, in_market = start_equity, None, None, [], 0
-    equity_curve = [{"ts": _iso(t[warmup - 1] if warmup < n else t[0]), "equity": float(start_equity)}]
     sign = 1 if p["direction"] == "long" else -1
     buy_side, sell_side = ("buy", "sell") if sign > 0 else ("sell", "buy")
 
@@ -170,6 +169,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
         pos = None
 
     warmup = max(rules.RSI_PERIOD, rules.ATR_PERIOD) + 2
+    equity_curve = [{"ts": _iso(t[warmup - 1] if warmup < n else t[0]), "equity": float(start_equity)}]
     for i in range(warmup, n):
         # 1) orders decided at the previous close fill at this bar's open
         if pending == "exit" and pos:
