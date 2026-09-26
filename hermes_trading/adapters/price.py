@@ -78,6 +78,24 @@ async def fetch(asset: str) -> dict:
 
 
 _ohlcv_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+PAGE = 300  # OKX serves at most 300 candles per request
+
+
+async def _fetch_pages(client, asset: str, tf: str, limit: int, tf_ms: int) -> list:
+    """The last `limit` candles; exchanges cap a request, so long windows are read forward in pages."""
+    import time
+
+    if limit <= PAGE:
+        return await client.fetch_ohlcv(asset, timeframe=tf, limit=limit)
+    now = time.time() * 1000
+    cursor, rows = int(now - limit * tf_ms), []
+    while cursor < now:
+        page = [r for r in await client.fetch_ohlcv(asset, timeframe=tf, since=cursor, limit=PAGE) if r[0] >= cursor]
+        if not page:
+            break
+        rows += page
+        cursor = int(page[-1][0] + tf_ms)
+    return rows[-limit:]
 
 
 async def ohlcv(asset: str, tf: str, limit: int) -> dict:
@@ -100,7 +118,7 @@ async def ohlcv(asset: str, tf: str, limit: int) -> dict:
     errors = []
     for exchange_id in order:
         try:
-            rows = await _client(exchange_id, exchange_id == primary).fetch_ohlcv(asset, timeframe=tf, limit=limit)
+            rows = await _fetch_pages(_client(exchange_id, exchange_id == primary), asset, tf, limit, TF_SECONDS[tf] * 1000)
         except Exception as e:
             errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
             continue

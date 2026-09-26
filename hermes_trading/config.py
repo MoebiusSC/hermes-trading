@@ -23,6 +23,7 @@ STATE_SEED = ROOT / "state_seed"
 
 GOAL_FILE = STATE / "goal.yaml"
 STRATEGY_TEMPLATE = STATE / "strategy.template.yaml"
+STRATEGY_TEMPLATE_CRYPTO = STATE / "strategy.template.crypto.yaml"  # new crypto pairs, when a migration wrote it
 HEARTBEAT_FILE = STATE / "heartbeat.json"
 EQUITY_FILE = STATE / "equity.jsonl"  # capital snapshots for the dashboard's equity curve
 EVENTS_FILE = STATE / "events.jsonl"  # worker issues and actions for the dashboard's activity feed
@@ -71,7 +72,8 @@ def ensure_asset_state(asset: str) -> AssetPaths:
     paths = asset_paths(asset)
     paths.history.mkdir(parents=True, exist_ok=True)
     if not paths.strategy.exists():
-        shutil.copy2(STRATEGY_TEMPLATE, paths.strategy)
+        crypto_template = not is_stock(asset) and STRATEGY_TEMPLATE_CRYPTO.exists()
+        shutil.copy2(STRATEGY_TEMPLATE_CRYPTO if crypto_template else STRATEGY_TEMPLATE, paths.strategy)
     return paths
 
 

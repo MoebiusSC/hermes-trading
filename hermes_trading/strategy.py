@@ -1,22 +1,30 @@
 """Strategy rules, shared by the live worker (loop.py) and the backtester (backtest.py), so a
 backtest runs exactly the rules the worker trades.
 
-strategy.yaml fields (the ones marked "since v2" are optional; missing means the original
+strategy.yaml fields (the ones marked "since vN" are optional; missing means the original
 behaviour, so an old file trades as it always did):
-  entry.indicator      rsi
-  entry.direction      long | short
-  entry.threshold      RSI level: long enters below it, short above it
-  entry.timeframe      candle size the RSI and ATR are computed on: 1m | 5m | 15m     (since v2, default 1m)
-  exit_rsi             long exits when RSI rises to it; short when it falls to 100 - it  (since v2, default 70)
+  entry.indicator      rsi | ema_cross                                                  (ema_cross since v4)
+                       rsi: mean reversion, enter when RSI is stretched, exit when it comes back
+                       ema_cross: trend following, be long while EMA(fast) > EMA(slow), short
+                       while below (as entry.direction allows); exit when they cross
+  entry.direction      long | short | both (both: ema_cross only, flips at each cross)
+  entry.threshold      rsi: RSI level; long enters below it, short above it
+  entry.fast/slow      ema_cross: EMA periods                                           (default 50 / 200)
+  entry.timeframe      candle size the signal and ATR use: 1m | 5m | 15m | 1h | 4h     (since v2, default 1m)
+  exit_rsi             rsi: long exits when RSI rises to it; short when it falls to 100 - it  (since v2, default 70)
   trend_filter         off | 1h | 4h: only enter with the trend, close above (long) or
                        below (short) the EMA(50) of that timeframe                      (since v2, default off)
   stop_loss_pct        stop distance in % of the entry price, used when stop_atr_mult is 0
   stop_atr_mult        stop distance in ATR(14) multiples; 0 = use stop_loss_pct         (since v2, default 0)
-  take_profit_r        target distance in multiples of the stop distance                (default 2)
+  take_profit_r        target distance in multiples of the stop distance; 0 = no target (default 2)
   position_size_r      % of the account lost if the stop is hit
   position_pct         fixed exposure: % of the account each position uses; 0 = size by
                        position_size_r and the stop distance                            (since v3, default 0)
   max_hold_min         close a position after this many minutes; 0 = no limit          (since v2, default 0)
+
+Stops are never closer than goal.yaml costs.min_stop_x_costs times the round-trip cost (see
+min_stop_frac): a stop inside the fees loses on every trade. After a stop, the same direction
+isn't re-entered until the signal changes.
 
 Indicators use closed candles only: the forming candle is dropped, so live and backtest agree.
 """
@@ -30,7 +38,9 @@ RSI_PERIOD = 14
 ATR_PERIOD = 14
 TREND_EMA = 50
 TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-ENTRY_TIMEFRAMES = ("1m", "5m", "15m")
+ENTRY_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h")
+INDICATORS = ("rsi", "ema_cross")
+DIRECTIONS = ("long", "short", "both")
 TREND_FILTERS = ("off", "1h", "4h")
 ENTRY_BARS = 100          # candles fetched for the entry timeframe (RSI/ATR warm-up)
 TREND_BARS = TREND_EMA * 2 + 20
@@ -42,26 +52,33 @@ PARAM_BOUNDS = {
     "exit_rsi": (55.0, 90.0),
     "stop_loss_pct": (0.2, 10.0),
     "stop_atr_mult": (0.0, 6.0),
-    "take_profit_r": (0.5, 10.0),
+    "take_profit_r": (0.0, 10.0),
     "position_size_r": (0.1, 2.0),
     "max_hold_min": (0.0, 2880.0),
     "position_pct": (0.0, 100.0),
+    "fast": (2.0, 200.0),
+    "slow": (5.0, 400.0),
 }
 
 # Cost model for simulated fills: % per side. Stocks fill at Alpaca (commission-free, real spread).
 DEFAULT_COSTS = {"crypto": {"fee_pct": 0.1, "slippage_pct": 0.02}, "stock": {"fee_pct": 0.0, "slippage_pct": 0.0}}
+DEFAULT_MIN_STOP_X_COSTS = 3.0
 
 
 def params(strategy: dict) -> dict:
     """The strategy as flat numbers, with the original behaviour for fields it doesn't set."""
     entry = strategy["entry"]
-    if entry.get("indicator", "rsi") != "rsi":
-        raise ValueError(f"unsupported indicator {entry['indicator']!r} (only 'rsi')")
-    if entry["direction"] not in ("long", "short"):
-        raise ValueError(f"unsupported direction {entry['direction']!r}")
+    indicator = str(entry.get("indicator", "rsi"))
+    if indicator not in INDICATORS:
+        raise ValueError(f"unsupported indicator {indicator!r} ({', '.join(INDICATORS)})")
+    if entry["direction"] not in DIRECTIONS or (indicator == "rsi" and entry["direction"] == "both"):
+        raise ValueError(f"unsupported direction {entry['direction']!r} for {indicator}")
     p = {
+        "indicator": indicator,
         "direction": entry["direction"],
-        "threshold": float(entry["threshold"]),
+        "threshold": float(entry.get("threshold", 30)),
+        "fast": float(entry.get("fast", 50)),
+        "slow": float(entry.get("slow", 200)),
         "timeframe": str(entry.get("timeframe", "1m")),
         "exit_rsi": float(strategy.get("exit_rsi", 70)),
         "trend_filter": str(strategy.get("trend_filter", "off")),
@@ -80,7 +97,14 @@ def params(strategy: dict) -> dict:
         value = p[name]
         if not lo <= value <= hi:
             raise ValueError(f"strategy {name!r} must be between {lo:g} and {hi:g}, got {value:g}")
+    if indicator == "ema_cross" and p["fast"] >= p["slow"]:
+        raise ValueError(f"entry.fast ({p['fast']:g}) must be below entry.slow ({p['slow']:g})")
     return p
+
+
+def bars_needed(p: dict) -> int:
+    """Closed candles the signal needs, with room for the EMA to settle."""
+    return max(ENTRY_BARS, int(p["slow"] * 3)) if p["indicator"] == "ema_cross" else ENTRY_BARS
 
 
 def costs(goal: dict, stock: bool) -> tuple[float, float]:
@@ -88,6 +112,13 @@ def costs(goal: dict, stock: bool) -> tuple[float, float]:
     kind = "stock" if stock else "crypto"
     c = {**DEFAULT_COSTS[kind], **((goal.get("costs") or {}).get(kind) or {})}
     return float(c["fee_pct"]) / 100, float(c["slippage_pct"]) / 100
+
+
+def min_stop_frac(goal: dict, stock: bool) -> float:
+    """Closest a stop may be, as a fraction of the price: a multiple of the round-trip cost."""
+    fee, slippage = costs(goal, stock)
+    k = float((goal.get("costs") or {}).get("min_stop_x_costs", DEFAULT_MIN_STOP_X_COSTS))
+    return k * 2 * (fee + slippage)
 
 
 # --- indicators (Wilder smoothing, as TradingView and the original loop) ---------------
@@ -160,6 +191,31 @@ def trend_ok(direction: str, trend_closes) -> bool | None:
     return last > ema[-1] if direction == "long" else last < ema[-1]
 
 
+def cross_state(closes, fast: float, slow: float) -> int | None:
+    """+1 while EMA(fast) is above EMA(slow), -1 while below; None without enough history."""
+    f, s = ema_series(closes, int(fast)), ema_series(closes, int(slow))
+    if not len(s) or np.isnan(s[-1]) or np.isnan(f[-1]):
+        return None
+    return 1 if f[-1] > s[-1] else -1
+
+
+def cross_states(closes, fast: float, slow: float) -> np.ndarray:
+    """cross_state at every bar (0 where there isn't enough history), for the backtester."""
+    f, s = ema_series(closes, int(fast)), ema_series(closes, int(slow))
+    out = np.zeros(len(s))
+    ok = ~np.isnan(s) & ~np.isnan(f)
+    out[ok] = np.where(f[ok] > s[ok], 1, -1)
+    return out
+
+
+def target_direction(p: dict, state: int | float | None) -> str | None:
+    """ema_cross: the side the strategy wants to be on now, or None to be flat."""
+    if not state:
+        return None
+    side = "long" if state > 0 else "short"
+    return side if p["direction"] in ("both", side) else None
+
+
 def entry_fires(p: dict, rsi_value: float | None, trend: bool | None) -> bool:
     if rsi_value is None or np.isnan(rsi_value):
         return False
@@ -168,15 +224,18 @@ def entry_fires(p: dict, rsi_value: float | None, trend: bool | None) -> bool:
     return rsi_value < p["threshold"] if p["direction"] == "long" else rsi_value > p["threshold"]
 
 
-def stop_distance(p: dict, price: float, atr: float | None) -> float:
+def stop_distance(p: dict, price: float, atr: float | None, floor_frac: float = 0.0) -> float:
     if p["stop_atr_mult"] > 0 and atr is not None and not np.isnan(atr) and atr > 0:
-        return p["stop_atr_mult"] * atr
-    return price * p["stop_loss_pct"] / 100
+        dist = p["stop_atr_mult"] * atr
+    else:
+        dist = price * p["stop_loss_pct"] / 100
+    return max(dist, price * floor_frac)
 
 
 def levels(p: dict, direction: str, fill: float, dist: float) -> tuple[float, float]:
     sign = 1 if direction == "long" else -1
-    return fill - sign * dist, fill + sign * dist * p["take_profit_r"]
+    target = fill + sign * dist * p["take_profit_r"] if p["take_profit_r"] > 0 else sign * float("inf")
+    return fill - sign * dist, target
 
 
 def size(p: dict, equity: float, price: float, dist: float) -> float:
@@ -193,13 +252,18 @@ def size(p: dict, equity: float, price: float, dist: float) -> float:
     return min((equity * p["position_size_r"] / 100) / dist, equity / price)
 
 
-def exit_reason(pos: dict, p: dict, last: float, rsi_value: float | None, now_ms: float) -> str | None:
+def exit_reason(pos: dict, p: dict, last: float, rsi_value: float | None, now_ms: float,
+                target: str | None = None) -> str | None:
+    """Why to close now. `target` is the ema_cross side wanted now (target_direction)."""
     is_long = pos["direction"] == "long"
     if (last <= pos["stop"]) if is_long else (last >= pos["stop"]):
         return "stop_loss"
-    if (last >= pos["target"]) if is_long else (last <= pos["target"]):
+    if pos.get("target") is not None and ((last >= pos["target"]) if is_long else (last <= pos["target"])):
         return "take_profit"
-    if rsi_value is not None and not np.isnan(rsi_value):
+    if p["indicator"] == "ema_cross":
+        if target != pos["direction"]:
+            return "signal_exit"
+    elif rsi_value is not None and not np.isnan(rsi_value):
         if (rsi_value >= p["exit_rsi"]) if is_long else (rsi_value <= 100 - p["exit_rsi"]):
             return "rsi_exit"
     if p["max_hold_min"] > 0 and pos.get("opened_ms") and now_ms - pos["opened_ms"] >= p["max_hold_min"] * 60000:

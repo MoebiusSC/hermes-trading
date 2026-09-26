@@ -94,6 +94,35 @@ def migrate_strategies(goal: dict, assets: list[str]) -> None:
     dump_yaml(config.STRATEGY_TEMPLATE, template)
 
 
+def apply_migrations(goal: dict, assets: list[str]) -> None:
+    """goal.yaml `strategy_migrations`: named, one-off changes for the assets of the listed kinds,
+    each recorded as a "migration" change. A strategy lists the migrations it received, so a
+    migration runs once per asset even across restarts. A crypto migration also writes the crypto
+    template, so pairs added later start from it."""
+    for migration in goal.get("strategy_migrations") or []:
+        mid, changes = str(migration["id"]), dict(migration["changes"])
+        kinds = set(migration.get("kinds") or ("crypto", "stock"))
+        note = str(migration.get("note") or "Cambio de estrategia elegido por backtest.")
+        for asset in assets:
+            stock = config.is_stock(asset)
+            paths = config.asset_paths(asset)
+            if ("stock" if stock else "crypto") not in kinds or not paths.strategy.exists():
+                continue
+            if mid in (load_yaml(paths.strategy).get("migrations") or []):
+                continue
+            records = reflect.apply_manual(paths, changes, stock, mode="migration", rationale=note)
+            strategy = load_yaml(paths.strategy)
+            strategy["migrations"] = [*(strategy.get("migrations") or []), mid]
+            dump_yaml(paths.strategy, strategy)
+            print(f"Migration {mid} → {asset}: " + (", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records) or "nothing to change"), flush=True)
+        if "crypto" in kinds:
+            template = load_yaml(config.STRATEGY_TEMPLATE)
+            for key, value in changes.items():
+                reflect._set_path_creating(template, key, value)
+            template["migrations"] = [*(template.get("migrations") or []), mid]
+            dump_yaml(config.STRATEGY_TEMPLATE_CRYPTO, template)
+
+
 def main(argv: list[str] | None = None) -> None:
     config.load_env()
     parser = argparse.ArgumentParser(description="hermes-trading paper worker")
@@ -113,6 +142,7 @@ def main(argv: list[str] | None = None) -> None:
     assets = [args.asset] if args.asset else config.goal_assets(goal)
     migrate_legacy_layout(assets[0])
     migrate_strategies(goal, config.goal_assets(goal))
+    apply_migrations(goal, config.goal_assets(goal))
     state_server.start()
     try:
         worker = Worker(assets, goal)

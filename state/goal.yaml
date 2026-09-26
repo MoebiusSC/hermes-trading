@@ -30,10 +30,11 @@ reflection_every:  10        # cycle cadence (per asset): closed trades between 
 one_variable_only: true      # scientific-method guardrail
 costs:                       # % per side on simulated fills (stocks fill at Alpaca: real prices, no commission)
   crypto: {fee_pct: 0.1, slippage_pct: 0.02}
+  min_stop_x_costs: 3        # a stop is never closer than 3x the round-trip cost
 risk:                        # portfolio limits checked before every automatic entry
-  max_open_positions: 6
-  max_open_crypto: 4         # crypto pairs move together: more open at once is close to one big bet
-  max_exposure_pct: 60       # invested value / total capital
+  max_open_positions: 19     # the crypto trend strategy is always in the market: one position per pair
+  max_open_crypto: 12
+  max_exposure_pct: 60       # invested value / total capital (12 pairs at 30% of their account ~ 30%)
 strategy_defaults:           # applied once at boot to strategies that predate them (recorded as "migration")
   exit_rsi: 75               # the first key marks a strategy as migrated
   entry.timeframe: "15m"
@@ -48,3 +49,25 @@ strategy_defaults_note: >-
   -4,6% en los 18 siguientes. Esta configuración fue la mejor de 288 combinaciones en los primeros 42 días
   (+0,6%) y quedó en -0,05% en los 18 días que no se usaron para elegirla: casi sin pérdidas, pero sin
   ventaja demostrada. En los ETFs pasó de +0,3% a +8,1% en total (pocas operaciones).
+strategy_migrations:         # named one-off changes, applied once per asset at boot (recorded as "migration")
+  - id: trend-4h-v1
+    kinds: [crypto]
+    changes:
+      entry.indicator: ema_cross
+      entry.direction: both
+      entry.timeframe: "4h"
+      entry.fast: 50
+      entry.slow: 200
+      trend_filter: "off"
+      stop_atr_mult: 3.0
+      take_profit_r: 0
+      max_hold_min: 0
+      position_pct: 30
+    note: >-
+      Cambio de reversión con RSI a seguimiento de tendencia: long mientras la EMA 50 está sobre la EMA 200
+      en velas de 4 h, short mientras está debajo, stop de 3 ATR y sin objetivo, con el 30% de la cuenta por
+      posición. Backtest de 3 años en los 12 pares con comisiones: con el 100% por posición ganó +40%, +52% y
+      +48% (sep 2023-24, 2024-25, 2025-26) mientras comprar y mantener hizo +148%, +99% y -39%; la
+      configuración se eligió con el último año y los dos anteriores sirvieron de verificación. Al 30%, la
+      cartera: +13,7%, +21,7% y +14,3%, drawdown máximo 12,5%. La estrategia RSI anterior perdió -19% en el
+      último año. Los ETFs no cambian: ahí seguir la tendencia rinde bastante menos que mantener.

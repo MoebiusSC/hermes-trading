@@ -527,10 +527,12 @@ function until(ms) {
 }
 // The worker reports decisions and reflection results in English (they also go to its logs); translate here.
 const REASONS = { stop_loss: "stop loss", take_profit: "objetivo", rsi_exit: "salida por RSI", time_exit: "tiempo máximo",
+  signal_exit: "cruce de medias", end_of_test: "fin del test",
   manual_close: "venta manual", external_close: "cierre externo", missing_at_broker: "no encontrada en el bróker" };
 const reasonEs = (r) => REASONS[r] || String(r).replace(/_/g, " ");
 const DECISIONS = [
   [/^no signal$/, "Sin señal"],
+  [/^no signal \(stopped out of (long|short), waiting for the next cross\)$/, "Sin señal (stop en $1: espera al próximo cruce)"],
   [/^no signal \(against the trend\)$/, "Sin señal (RSI en zona de entrada, pero en contra de la tendencia)"],
   [/^skip: risk limit: (\d+) positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones abiertas (máx. $2)"],
   [/^skip: risk limit: (\d+) crypto positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones cripto abiertas (máx. $2)"],
@@ -553,6 +555,8 @@ const DECISIONS = [
   [/^error$/, "Error"],
 ];
 function decisionEs(text) {
+  // a tick can close and open in one go ("closed long (signal_exit); opened short")
+  if (text.includes("; ")) return text.split("; ").map(decisionEs).join(" · ");
   for (const [re, out] of DECISIONS) if (re.test(text)) return text.replace(re, out);
   return text.replace(/^./, (x) => x.toUpperCase());
 }
@@ -570,6 +574,7 @@ const REFLECT_REPORTS = [
   [/^rejected by backtest: (\S+) (\S+) → (\S+) \(OOS trades=(\d+), score (\S+) → (\S+), whole period (\S+) → (\S+)\)$/,
     "Rechazado por backtest: $1 $2 → $3 (fuera de muestra $5 → $6 con $4 operaciones; periodo completo $7 → $8)"],
   [/^rejected: (\S+) (\S+) → (\S+) \(duplicate\)$/, "Descartado: $1 $2 → $3 ya se probó hace poco"],
+  [/^rejected: (\S+) (\S+) → (\S+) \(invalid\)$/, "Descartado: $1 $2 → $3 no es una combinación válida"],
 ];
 function reportEs(text) {
   for (const [re, out] of REFLECT_REPORTS) if (re.test(text)) return text.replace(re, out);
@@ -578,16 +583,29 @@ function reportEs(text) {
 const MODE_LABEL = { hermes: "Hermes", llm: "IA (Gemini)", fallback: "Regla de respaldo", manual: "Manual (dashboard)",
   revert: "Reversión automática", migration: "Migración (backtest)" };
 const VAR_LABEL = { "entry.threshold": "RSI de entrada", "entry.direction": "Dirección", "entry.timeframe": "Velas de la señal",
+  "entry.indicator": "Tipo de señal", "entry.fast": "EMA rápida", "entry.slow": "EMA lenta",
   trend_filter: "Filtro de tendencia", exit_rsi: "RSI de salida", stop_loss_pct: "Stop loss %", stop_atr_mult: "Stop (× ATR)", position_pct: "Exposición por posición %",
   take_profit_r: "Objetivo (× stop)", position_size_r: "Riesgo por operación %", max_hold_min: "Tiempo máximo (min)" };
 const TF_LABEL = { "1m": "1 min", "5m": "5 min", "15m": "15 min", "1h": "1 h", "4h": "4 h", off: "sin filtro" };
 // Strategy fields with the original behaviour when an older strategy.yaml doesn't have them (strategy.py)
 function stratView(s) {
-  return { direction: s.entry.direction, threshold: s.entry.threshold, timeframe: s.entry.timeframe || "1m",
+  return { indicator: s.entry.indicator || "rsi", fast: s.entry.fast ?? 50, slow: s.entry.slow ?? 200,
+    direction: s.entry.direction, threshold: s.entry.threshold, timeframe: s.entry.timeframe || "1m",
     trend: s.trend_filter || "off", exitRsi: s.exit_rsi ?? 70, stopPct: s.stop_loss_pct, atrMult: s.stop_atr_mult ?? 0,
     tp: s.take_profit_r ?? 2, risk: s.position_size_r, maxHold: s.max_hold_min ?? 0, posPct: s.position_pct ?? 0 };
 }
 const stopText = (v) => (v.atrMult > 0 ? `${v.atrMult}× ATR` : `${v.stopPct}%`);
+const DIR_LABEL = { long: "long", short: "short", both: "long + short" };
+const signalText = (v) => (v.indicator === "ema_cross" ? `EMA ${v.fast}/${v.slow}` : `RSI < ${v.threshold} → ${v.exitRsi}`);
+function emaLine(closes, n) {
+  const out = new Array(closes.length).fill(null);
+  if (closes.length < n) return out;
+  let v = closes.slice(0, n).reduce((s, x) => s + x, 0) / n;
+  out[n - 1] = v;
+  const k = 2 / (n + 1);
+  for (let i = n; i < closes.length; i++) { v += k * (closes[i] - v); out[i] = v; }
+  return out;
+}
 const varLabel = (v) => VAR_LABEL[v] || v;
 
 function el(tag, attrs = {}, text) {
@@ -1520,7 +1538,7 @@ function renderDetail() {
   if (pos) {
     refs.push({ y: pos.entry_price, label: `Entrada ${priceFmt(pos.entry_price)}`, color: css("--text-secondary"), dashed: false });
     refs.push({ y: pos.stop, label: `Stop ${priceFmt(pos.stop)}`, color: css("--critical"), dashed: true });
-    refs.push({ y: pos.target, label: `Objetivo ${priceFmt(pos.target)}`, color: css("--good"), dashed: true });
+    if (pos.target != null) refs.push({ y: pos.target, label: `Objetivo ${priceFmt(pos.target)}`, color: css("--good"), dashed: true });
     marks.push({ x: Date.parse(pos.opened_at), y: pos.entry_price, shape: "entry", label: `Entrada ${priceFmt(pos.entry_price)}` });
   }
   for (const t of a.trades) {
@@ -1538,19 +1556,34 @@ function renderDetail() {
     candleChart(document.getElementById("price-chart"), null, { emptyText: "Cargando velas…" });
   }
   const sv = strat ? stratView(strat) : null;
+  if (sv && sv.indicator === "ema_cross") {
+    const ce = tfCandles[`${a.asset}|${sv.timeframe}`];
+    document.getElementById("rsi-title").textContent = `Medias EMA ${sv.fast}/${sv.slow} · velas de ${TF_LABEL[sv.timeframe]}`;
+    document.getElementById("rsi-sub").textContent = `${DIR_LABEL[sv.direction] === "long + short" ? "Long mientras la EMA rápida está sobre la lenta, short mientras está debajo" : `${DIR_LABEL[sv.direction]} mientras la EMA rápida ${sv.direction === "long" ? "está sobre" : "está debajo de"} la lenta`}; cambia en cada cruce, o sale antes en el stop`;
+    const fastL = ce ? emaLine(ce.close, sv.fast) : [], slowL = ce ? emaLine(ce.close, sv.slow) : [];
+    lineChart(document.getElementById("rsi-chart"), {
+      series: ce ? [
+        { name: "Precio", color: css("--text-muted"), points: ce.t.map((t, i) => [t, ce.close[i]]) },
+        { name: `EMA ${sv.fast}`, color, points: ce.t.map((t, i) => [t, fastL[i]]).filter((p) => p[1] != null) },
+        { name: `EMA ${sv.slow}`, color: css("--text-secondary"), dashed: true, points: ce.t.map((t, i) => [t, slowL[i]]).filter((p) => p[1] != null) },
+      ] : [{ name: "EMA", color, points: [] }],
+      height: 200, label: `${a.asset} medias`, tooltipFmt: priceFmt, yFmt: (v) => priceFmt(v), emptyText: "Cargando velas…",
+    });
+  }
   const dirLong = !sv || sv.direction === "long";
   const exitLevel = sv ? (dirLong ? sv.exitRsi : 100 - sv.exitRsi) : 70;
   const rtf = sv ? sv.timeframe : "1m";
   const cr = rtf === "1m" ? c1 : tfCandles[`${a.asset}|${rtf}`];
-  document.getElementById("rsi-title").textContent = `RSI (14) · velas de ${TF_LABEL[rtf]}`;
+  const rsiMode = !sv || sv.indicator !== "ema_cross";
+  if (rsiMode) document.getElementById("rsi-title").textContent = `RSI (14) · velas de ${TF_LABEL[rtf]}`;
   const rsiRefs = sv ? [
     { y: sv.threshold, label: `Entrada ${dirLong ? "<" : ">"} ${sv.threshold}`, color: css("--text-secondary"), dashed: true },
     { y: exitLevel, label: `Salida ${dirLong ? "≥" : "≤"} ${exitLevel}`, color: css("--text-muted"), dashed: true },
   ] : [];
-  document.getElementById("rsi-sub").textContent = sv
+  if (rsiMode) document.getElementById("rsi-sub").textContent = sv
     ? `Abre un ${sv.direction} cuando el RSI ${dirLong ? "baja de" : "sube de"} ${sv.threshold}${sv.trend !== "off" ? `, solo a favor de la tendencia de ${TF_LABEL[sv.trend]}` : ""}; sale con RSI ${exitLevel}, en el stop, en el objetivo${sv.maxHold > 0 ? " o por tiempo" : ""}`
     : "";
-  lineChart(document.getElementById("rsi-chart"), {
+  if (rsiMode) lineChart(document.getElementById("rsi-chart"), {
     series: cr ? [{ name: "RSI", color, points: cr.t.map((t, i) => [t, cr.rsi[i]]).filter((p) => p[1] != null) }] : [{ name: "RSI", color, points: [] }],
     height: 170, yDomain: [0, 100], refs: rsiRefs, label: `${a.asset} RSI`, yFmt: (v) => v.toFixed(0),
     tooltipFmt: (v) => v.toFixed(1), emptyText: "Cargando velas en vivo…",
@@ -1567,11 +1600,17 @@ function renderDetail() {
   if (strat) {
     const st = tradeStats(a.trades), bh = buyHold(a);
     const v = stratView(strat);
-    const rows = [
+    const signalRows = v.indicator === "ema_cross" ? [
+      ["Señal", `cruce de EMA ${v.fast}/${v.slow} en velas de ${TF_LABEL[v.timeframe]} (seguimiento de tendencia)`], ["Dirección", DIR_LABEL[v.direction]],
+      ["Salida", "al cruzarse las medias (y cambia de lado si opera long + short)"],
+    ] : [
       ["Señal", `RSI(14) en velas de ${TF_LABEL[v.timeframe]}`], ["Dirección", v.direction],
       ["Entrada", `RSI ${v.direction === "long" ? "<" : ">"} ${v.threshold}${v.trend !== "off" ? ` y a favor de la tendencia de ${TF_LABEL[v.trend]}` : ""}`],
       ["Salida por RSI", `${v.direction === "long" ? "≥" : "≤"} ${v.direction === "long" ? v.exitRsi : 100 - v.exitRsi}`],
-      ["Stop", stopText(v)], ["Objetivo", v.tp + "× distancia del stop"],
+    ];
+    const rows = [
+      ...signalRows,
+      ["Stop", stopText(v)], ["Objetivo", v.tp > 0 ? v.tp + "× distancia del stop" : "sin objetivo"],
       ["Tiempo máximo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "sin límite"],
       ["Tamaño", v.posPct > 0 ? `fijo: ${v.posPct}% de la cuenta` : `según riesgo: se pierde ${v.risk}% de la cuenta si toca el stop`],
       ["Rentabilidad total", pct(assetTotalRet(a), 3)], ["Comprar y mantener", bh ? `${pct(bh.ret, 3)} desde ${dateTimeFmt(Date.parse(bh.since))}` : "—"],
@@ -1605,13 +1644,16 @@ const SETTINGS = [
   { key: "exit_rsi", label: "RSI de salida", min: 55, max: 90, step: 1, fallback: 70, hint: "long sale al subir a este nivel; short, al bajar a 100 menos este valor" },
   { key: "stop_atr_mult", label: "Stop (× ATR)", min: 0, max: 6, step: 0.25, fallback: 0, hint: "0 = usar el stop loss %; si no, la distancia del stop se adapta a la volatilidad" },
   { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1, hint: "solo se usa con Stop (× ATR) en 0" },
-  { key: "take_profit_r", label: "Objetivo (× stop)", min: 0.5, max: 10, step: 0.1, fallback: 2.0 },
+  { key: "take_profit_r", label: "Objetivo (× stop)", min: 0, max: 10, step: 0.1, fallback: 2.0, hint: "0 = sin objetivo (la tendencia sale por el cruce o el stop)" },
+  { key: "entry.fast", label: "EMA rápida", min: 2, max: 200, step: 1, fallback: 50, hint: "solo cruce de EMA" },
+  { key: "entry.slow", label: "EMA lenta", min: 5, max: 400, step: 1, fallback: 200, hint: "solo cruce de EMA; mayor que la rápida" },
   { key: "max_hold_min", label: "Tiempo máximo (min)", min: 0, max: 2880, step: 30, fallback: 0, hint: "0 = sin límite" },
   { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05, hint: "sin efecto si la exposición por posición es mayor que 0" },
   { key: "position_pct", label: "Exposición por posición %", min: 0, max: 100, step: 5, fallback: 0, hint: "% de la cuenta que usa cada posición; 0 = según el riesgo por operación y el stop" },
 ];
 const SELECTS = [
-  { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m"], fallback: "1m" },
+  { key: "entry.indicator", label: "Tipo de señal", options: ["rsi", "ema_cross"], labels: { rsi: "RSI (reversión)", ema_cross: "Cruce de EMA (tendencia)" }, fallback: "rsi" },
+  { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m", "1h", "4h"], fallback: "1m" },
   { key: "trend_filter", label: "Filtro de tendencia", options: ["off", "1h", "4h"], fallback: "off" },
 ];
 const drafts = {};  // asset -> {key: value} not saved yet; survives the periodic re-render
@@ -1646,13 +1688,13 @@ function renderEditor(a) {
     if (k in draft && String(draft[k]) !== String(saved[k])) input.classList.add("dirty");
   };
   const dir = el("select", { id: "ed-dir" });
-  for (const d of ["long", "short"]) { const o = el("option", { value: d }, d); if (value("entry.direction") === d) o.selected = true; dir.append(o); }
+  for (const d of ["long", "short", "both"]) { const o = el("option", { value: d }, DIR_LABEL[d]); if (value("entry.direction") === d) o.selected = true; dir.append(o); }
   if (a.kind === "stock") { dir.disabled = true; dir.title = "Las acciones y los ETFs solo operan en long"; }
   bind(dir, "entry.direction");
   form.append(el("label", { for: "ed-dir" }, "Dirección"), dir);
   for (const f of SELECTS) {
     const id = "ed-" + f.key.replace(".", "-"), sel = el("select", { id });
-    for (const o of f.options) { const opt = el("option", { value: o }, TF_LABEL[o]); if (value(f.key) === o) opt.selected = true; sel.append(opt); }
+    for (const o of f.options) { const opt = el("option", { value: o }, (f.labels || TF_LABEL)[o]); if (value(f.key) === o) opt.selected = true; sel.append(opt); }
     bind(sel, f.key);
     form.append(el("label", { for: id }, f.label), sel);
   }
@@ -1788,15 +1830,15 @@ function renderEstrategia() {
         e.status === "done" ? `${pct(e.avg_before * 100, 3)} → ${pct(e.avg_after * 100, 3)}` : "—"],
         onClick: () => { selected = a.asset; setTab("activos"); } };
     }), { empty: "Aún no hay cambios de estrategia." });
-  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Dirección", "Velas", "Tendencia", "RSI entrada", "RSI salida", "Stop", "Objetivo ×", "Tiempo máx.", "Tamaño", "Pendientes", ""],
+  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Señal", "Dirección", "Velas", "Filtro", "Stop", "Objetivo ×", "Tiempo máx.", "Tamaño", "Pendientes", ""],
     state.assets.filter((a) => a.strategy).map((a) => {
       const v = stratView(a.strategy);
       const lastH = a.hypotheses[a.hypotheses.length - 1];
       const pending = lastH ? a.trades.filter((t) => t.closed_at > lastH.ts).length : a.trades.length;
       const b = el("button", { type: "button", class: "small" }, "Editar");
       b.addEventListener("click", () => { selected = a.asset; setTab("activos"); setTimeout(() => document.getElementById("editor").scrollIntoView({ behavior: "smooth", block: "center" }), 50); });
-      return [a.asset, "v" + a.strategy.version, v.direction, TF_LABEL[v.timeframe], TF_LABEL[v.trend], String(v.threshold), String(v.exitRsi),
-        stopText(v), String(v.tp), v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", v.posPct > 0 ? `${v.posPct}% fijo` : `riesgo ${v.risk}%`,
+      return [a.asset, "v" + a.strategy.version, signalText(v), DIR_LABEL[v.direction], TF_LABEL[v.timeframe], TF_LABEL[v.trend],
+        stopText(v), v.tp > 0 ? String(v.tp) : "sin objetivo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", v.posPct > 0 ? `${v.posPct}% fijo` : `riesgo ${v.risk}%`,
         `${Math.min(pending, state.goal.reflection_every)}/${state.goal.reflection_every}`, { node: b, cls: "act" }];
     }));
 }

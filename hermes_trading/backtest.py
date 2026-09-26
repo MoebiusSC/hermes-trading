@@ -132,16 +132,19 @@ def _iso(ms: float) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: float, fee: float, slippage: float) -> dict:
+def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: float, fee: float, slippage: float,
+             min_stop_frac: float = 0.0) -> dict:
     p = rules.params(strategy)
     tfe = rules.TF_SECONDS[p["timeframe"]] * 1000
     t, o, h, lo, c = (np.asarray(entry[k], dtype=float) for k in ("t", "open", "high", "low", "close"))
     n = len(t)
+    ema_mode = p["indicator"] == "ema_cross"
     rsi = rules.rsi_series(c)
     atr = rules.atr_series(h, lo, c)
+    states = rules.cross_states(c, p["fast"], p["slow"]) if ema_mode else None
     # trend at each entry bar's close: the last trend bar that had closed by then
     trend_at = [None] * n
-    if p["trend_filter"] != "off" and trend and trend["t"]:
+    if not ema_mode and p["trend_filter"] != "off" and trend and trend["t"]:
         ttf = rules.TF_SECONDS[p["trend_filter"]] * 1000
         tt, tc = np.asarray(trend["t"], dtype=float), np.asarray(trend["close"], dtype=float)
         ema = rules.ema_series(tc)
@@ -153,67 +156,81 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             if j >= 0 and not np.isnan(ema[j]):
                 trend_at[i] = bool(tc[j] > ema[j]) if p["direction"] == "long" else bool(tc[j] < ema[j])
 
-    equity, pos, pending, trades, in_market = start_equity, None, None, [], 0
-    sign = 1 if p["direction"] == "long" else -1
-    buy_side, sell_side = ("buy", "sell") if sign > 0 else ("sell", "buy")
+    equity, pos, trades, in_market = start_equity, None, [], 0
+    pending_exit, pending_entry, blocked = None, None, None  # blocked: side stopped out, until the signal changes
+
+    def sgn(side: str) -> int:
+        return 1 if side == "long" else -1
 
     def close_at(price: float, i_ms: float, reason: str) -> None:
-        nonlocal equity, pos
-        gross = sign * pos["qty"] * (price - pos["entry_price"])
+        nonlocal equity, pos, blocked
+        gross = sgn(pos["direction"]) * pos["qty"] * (price - pos["entry_price"])
         fees = pos["fees"] + pos["qty"] * price * fee
         pnl = gross - fees
-        trades.append({"opened_at": _iso(pos["opened_ms"]), "closed_at": _iso(i_ms), "direction": p["direction"],
+        trades.append({"opened_at": _iso(pos["opened_ms"]), "closed_at": _iso(i_ms), "direction": pos["direction"],
                        "entry_price": pos["entry_price"], "exit_price": price, "exit_reason": reason,
                        "gross_pnl": gross, "fees": fees, "pnl": pnl, "pnl_pct": pnl / equity})
         equity += pnl
+        if reason == "stop_loss":
+            blocked = pos["direction"]
         pos = None
+
+    def exit_side(side: str) -> str:
+        return "sell" if side == "long" else "buy"
 
     warmup = max(rules.RSI_PERIOD, rules.ATR_PERIOD) + 2
     equity_curve = [{"ts": _iso(t[warmup - 1] if warmup < n else t[0]), "equity": float(start_equity)}]
     for i in range(warmup, n):
-        # 1) orders decided at the previous close fill at this bar's open
-        if pending == "exit" and pos:
-            close_at(rules.fill(o[i], sell_side, slippage), t[i], pos.pop("exit_reason"))
-        elif pending == "entry" and not pos:
-            fill_price = rules.fill(o[i], buy_side, slippage)
-            dist = rules.stop_distance(p, fill_price, atr[i - 1])
+        # 1) orders decided at the previous close fill at this bar's open (an exit, then maybe the flip)
+        if pending_exit and pos:
+            close_at(rules.fill(o[i], exit_side(pos["direction"]), slippage), t[i], pending_exit)
+        if pending_entry and not pos:
+            side = pending_entry
+            fill_price = rules.fill(o[i], "buy" if side == "long" else "sell", slippage)
+            dist = rules.stop_distance(p, fill_price, atr[i - 1], min_stop_frac)
             qty = rules.size(p, equity, fill_price, dist)
-            stop, target = rules.levels(p, p["direction"], fill_price, dist)
-            pos = {"direction": p["direction"], "entry_price": fill_price, "qty": qty, "stop": stop, "target": target,
+            stop, target = rules.levels(p, side, fill_price, dist)
+            pos = {"direction": side, "entry_price": fill_price, "qty": qty, "stop": stop, "target": target,
                    "opened_ms": t[i], "fees": qty * fill_price * fee}
-        pending = None
+        pending_exit = pending_entry = None
         # 2) stops and targets inside this bar
         if pos:
             in_market += 1
+            sign = sgn(pos["direction"])
             hit_stop = lo[i] <= pos["stop"] if sign > 0 else h[i] >= pos["stop"]
             hit_target = h[i] >= pos["target"] if sign > 0 else lo[i] <= pos["target"]
             if hit_stop:
                 level = min(o[i], pos["stop"]) if sign > 0 else max(o[i], pos["stop"])
-                close_at(rules.fill(level, sell_side, slippage), t[i] + tfe, "stop_loss")
+                close_at(rules.fill(level, exit_side(pos["direction"]), slippage), t[i] + tfe, "stop_loss")
             elif hit_target:
                 level = max(o[i], pos["target"]) if sign > 0 else min(o[i], pos["target"])
-                close_at(rules.fill(level, sell_side, slippage), t[i] + tfe, "take_profit")
+                close_at(rules.fill(level, exit_side(pos["direction"]), slippage), t[i] + tfe, "take_profit")
         # Mark the portfolio to market after fills/stops for drawdown and time-series Sharpe.
-        mark_price = c[i]
         marked = equity
         if pos:
-            gross = sign * pos["qty"] * (mark_price - pos["entry_price"])
-            estimated_exit_fee = pos["qty"] * mark_price * fee
-            marked += gross - pos["fees"] - estimated_exit_fee
+            gross = sgn(pos["direction"]) * pos["qty"] * (c[i] - pos["entry_price"])
+            marked += gross - pos["fees"] - pos["qty"] * c[i] * fee
         equity_curve.append({"ts": _iso(t[i] + tfe), "equity": float(marked)})
 
         # 3) decisions at this bar's close
         if i == n - 1:
             break
+        target = rules.target_direction(p, states[i]) if ema_mode else None
+        if ema_mode and blocked and target != blocked:
+            blocked = None
         if pos:
-            reason = rules.exit_reason({**pos, "stop": -np.inf * sign, "target": np.inf * sign}, p, c[i], rsi[i], t[i] + tfe)
+            reason = rules.exit_reason({**pos, "stop": -np.inf * sgn(pos["direction"]), "target": np.inf * sgn(pos["direction"])},
+                                       p, c[i], rsi[i], t[i] + tfe, target)
             if reason:
-                pos["exit_reason"] = reason
-                pending = "exit"
-        elif rules.entry_fires(p, rsi[i], trend_at[i]):
-            pending = "entry"
+                pending_exit = reason
+        if not pos or pending_exit:
+            if ema_mode:
+                if target and target != blocked and (not pos or target != pos["direction"]):
+                    pending_entry = target
+            elif not pos and rules.entry_fires(p, rsi[i], trend_at[i]):
+                pending_entry = p["direction"]
     if pos:  # mark an open position to the last close, as a trade, so its loss or gain counts
-        close_at(rules.fill(c[-1], sell_side, slippage), t[-1] + tfe, "end_of_test")
+        close_at(rules.fill(c[-1], exit_side(pos["direction"]), slippage), t[-1] + tfe, "end_of_test")
         equity_curve.append({"ts": _iso(t[-1] + tfe), "equity": float(equity)})
     return {"trades": trades, "bars": n, "in_market_pct": in_market / max(1, n - warmup) * 100,
             "final_equity": equity, "start_equity": start_equity, "equity_curve": equity_curve}
@@ -239,7 +256,9 @@ def summarize(trades: list[dict], goal: dict, equity_curve: list[dict] | None = 
 def run(asset: str, strategy: dict, goal: dict, days: float = DEFAULT_DAYS) -> dict:
     """Walk-forward backtest: whole period, in sample (first 70%) and out of sample (last 30%)."""
     p = rules.params(strategy)
-    entry = history(asset, p["timeframe"], days)
+    # extra history before the window so slow indicators are settled when it starts
+    warm_days = rules.bars_needed(p) * rules.TF_SECONDS[p["timeframe"]] / 86400
+    entry = history(asset, p["timeframe"], days + warm_days)
     if len(entry["t"]) < 100:
         raise RuntimeError(f"only {len(entry['t'])} {p['timeframe']} candles of history for {asset}")
     trend = None
@@ -247,19 +266,22 @@ def run(asset: str, strategy: dict, goal: dict, days: float = DEFAULT_DAYS) -> d
         warm = rules.TREND_BARS * rules.TF_SECONDS[p["trend_filter"]] / 86400
         trend = history(asset, p["trend_filter"], days + warm)
     fee, slippage = rules.costs(goal, config.is_stock(asset))
-    sim = simulate(strategy, entry, trend, config.start_equity(asset, goal), fee, slippage)
-    split_ms = entry["t"][0] + (entry["t"][-1] - entry["t"][0]) * (1 - OOS_FRACTION)
+    sim = simulate(strategy, entry, trend, config.start_equity(asset, goal), fee, slippage,
+                   rules.min_stop_frac(goal, config.is_stock(asset)))
+    window_ms = entry["t"][-1] - days * 86400000
+    split_ms = window_ms + (entry["t"][-1] - window_ms) * (1 - OOS_FRACTION)
     split = _iso(split_ms)
-    first, last = entry["close"][0], entry["close"][-1]
-    all_trades = sim["trades"]
+    first = next(cl for tt, cl in zip(entry["t"], entry["close"]) if tt >= window_ms)
+    last = entry["close"][-1]
+    all_trades = [x for x in sim["trades"] if x["opened_at"] >= _iso(window_ms)]
     in_trades = [x for x in all_trades if x["opened_at"] < split]
     oos_trades = [x for x in all_trades if x["opened_at"] >= split]
-    curve = sim["equity_curve"]
+    curve = [q for q in sim["equity_curve"] if q["ts"] >= _iso(window_ms)]
     in_curve = [p for p in curve if p["ts"] < split]
     oos_curve = [p for p in curve if p["ts"] >= split]
     return {
         "asset": asset,
-        "from": _iso(entry["t"][0]), "to": _iso(entry["t"][-1]), "split": split, "days": days,
+        "from": _iso(window_ms), "to": _iso(entry["t"][-1]), "split": split, "days": days,
         "timeframe": p["timeframe"], "source": entry.get("source"), "fee_pct": fee * 100, "slippage_pct": slippage * 100,
         "in_market_pct": round(sim["in_market_pct"], 1),
         "buy_hold_pct": round((last / first - 1) * 100, 3),

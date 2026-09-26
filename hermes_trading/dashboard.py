@@ -43,6 +43,7 @@ TIMEFRAMES = {
     "5m": ("5m", 288, "5Min", 10),
     "15m": ("15m", 192, "15Min", 20),
     "1h": ("1h", 168, "1Hour", 40),
+    "4h": ("4h", 600, "4Hour", 450),
     "1d": ("1d", 180, "1Day", 400),
 }
 EQUITY_POINTS = 1500  # the equity curve is downsampled to about this many snapshots

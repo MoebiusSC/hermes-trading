@@ -112,6 +112,8 @@ class Alpaca:
         if hit and time.monotonic() - hit[0] < min(TF_SECONDS[tf] / 5, 300):
             return hit[1]
         timeframe, days = self._TF[tf]
+        # bars exist only in market hours (~1/5 of the calendar), so reach back far enough for `limit`
+        days = max(days, int(limit * TF_SECONDS[tf] / 86400 * 5) + 5)
         start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
         data = await self._req("GET", f"{DATA_URL}/v2/stocks/{symbol}/bars",
                                params={"timeframe": timeframe, "limit": limit, "feed": self.feed, "sort": "desc", "start": start})

@@ -47,11 +47,14 @@ TUNABLE = {
     "stop_loss_pct": (0.2, 10.0),
     "stop_atr_mult": (0.0, 6.0),
     "position_size_r": (0.1, 2.0),
-    "take_profit_r": (0.5, 10.0),
+    "take_profit_r": (0.0, 10.0),  # 0 = no target
     "max_hold_min": (0.0, 2880.0),
+    "entry.fast": (5.0, 100.0),
+    "entry.slow": (20.0, 400.0),
 }
 # Values for fields an older strategy.yaml doesn't have (the original behaviour; see strategy.py)
-TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0, "position_pct": 0.0}
+TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0, "position_pct": 0.0,
+                    "entry.fast": 50.0, "entry.slow": 200.0}
 # Largest move allowed per cycle, so one reflection nudges a variable instead of replacing it.
 MAX_STEP = {
     "entry.threshold": 5.0,
@@ -61,16 +64,25 @@ MAX_STEP = {
     "position_size_r": 0.25,
     "take_profit_r": 0.5,
     "max_hold_min": 120.0,
+    "entry.fast": 5.0,
+    "entry.slow": 20.0,
 }
 # Settings only changed by hand (dashboard) or by a migration, never by a reflection
 # Numbers only changed by hand: how much of the account a position uses is the owner's call, not the AI's
 MANUAL_NUMBERS = {"position_pct": (0.0, 100.0)}
-CHOICES = {"entry.direction": ("long", "short"), "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
+CHOICES = {"entry.indicator": rules.INDICATORS, "entry.direction": rules.DIRECTIONS,
+           "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
 AUTO_MODES = ("hermes", "llm", "fallback", "revert")  # changes the reflection made (not manual/migration)
 REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
 # Backtest validation of a hypothesis. With the 15m strategy, 90 days leaves 4-16 out-of-sample trades
 # per asset (median ~10); fewer than MIN_OOS_TRADES is too thin to trust either way.
 VALIDATION_DAYS = 90
+# Slower signals trade less, so they need a longer window for the same out-of-sample evidence
+VALIDATION_DAYS_BY_TF = {"1m": 30, "5m": 60, "15m": 90, "1h": 365, "4h": 730}
+
+
+def validation_days(strategy: dict) -> int:
+    return VALIDATION_DAYS_BY_TF.get(rules.params(strategy)["timeframe"], VALIDATION_DAYS)
 MIN_OOS_TRADES = 6
 DUPLICATE_LOOKBACK = 10  # don't re-test a value already tried in the asset's last N hypotheses
 HERMES_TRADE_WINDOW = 25
@@ -113,6 +125,14 @@ def new_trades_since_last_reflection(trades: list[dict], hypotheses: list[dict])
 
 def fallback_hypothesis(strategy: dict, goal: dict, m: dict) -> dict | None:
     """Drawdown breach is checked first (risk before return); only one rule ever fires."""
+    if rules.params(strategy)["indicator"] == "ema_cross":
+        # trend following: only react to risk, with a wider stop that is hit less by noise
+        if m["max_drawdown"] > float(goal["max_drawdown"]):
+            old = float(strategy.get("stop_atr_mult", 3) or 3)
+            return {"variable": "stop_atr_mult", "new_value": round(old + 0.5, 2), "predicted_direction": "up",
+                    "rationale": f"Drawdown {m['max_drawdown']:.2%} exceeded max {goal['max_drawdown']:.2%}; "
+                    "widen the ATR stop so noise stops the trend less often."}
+        return None
     if m["max_drawdown"] > float(goal["max_drawdown"]):
         old = float(strategy["stop_loss_pct"])
         return {
@@ -148,11 +168,15 @@ def build_prompt(asset: str, strategy: dict, goal: dict, trades: list[dict], m: 
     return f"""You are tuning a paper-trading strategy for {asset} ({market}). Propose exactly ONE change.
 
 How the strategy trades (strategy.yaml fields):
-- entry: RSI(14) on entry.timeframe candles; long enters when RSI < entry.threshold (short: RSI > threshold),
-  only when trend_filter (off/1h/4h EMA50) agrees.
-- exits: stop, target (take_profit_r x stop distance), RSI reaching exit_rsi (short: 100 - exit_rsi), or after
-  max_hold_min minutes (0 = no limit). Stop distance = stop_atr_mult x ATR(14) when stop_atr_mult > 0,
-  otherwise stop_loss_pct % of the price.
+- entry.indicator "rsi" (mean reversion): RSI(14) on entry.timeframe candles; long enters when RSI < entry.threshold
+  (short: RSI > threshold), only when trend_filter (off/1h/4h EMA50) agrees; exits when RSI reaches exit_rsi
+  (short: 100 - exit_rsi).
+- entry.indicator "ema_cross" (trend following): long while EMA(entry.fast) > EMA(entry.slow) on entry.timeframe
+  candles, short while below (entry.direction both/long/short); exits and flips at each cross. entry.threshold and
+  exit_rsi don't apply; tune entry.fast, entry.slow, stop_atr_mult or take_profit_r (0 = no target) instead.
+- exits: stop, target (take_profit_r x stop distance), the signal above, or after max_hold_min minutes (0 = no
+  limit). Stop distance = stop_atr_mult x ATR(14) when stop_atr_mult > 0, otherwise stop_loss_pct % of the price,
+  and never closer than a few times the round-trip cost.
 - size: position_size_r % of the account is lost if the stop is hit, unless position_pct > 0 (set by the owner, not
   tunable): then every position uses position_pct % of the account and position_size_r has no effect.
 - costs per side: fee {fee * 100:.3f}%, slippage {slip * 100:.3f}% (already included in all P&L below).
@@ -337,6 +361,10 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool, mode: str
             diffs.append((variable, old, new))
     if not diffs:
         return []
+    try:  # the combination must be valid too (e.g. entry.fast below entry.slow), or the worker would fail every tick
+        rules.params(updated)
+    except ValueError as e:
+        raise ValueError(f"combinación no válida: {e}") from None
 
     prior_version = str(strategy["version"])
     dump_yaml(paths.history / f"v{int(prior_version):04d}.yaml", strategy)
@@ -458,7 +486,7 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     baseline = None
     if validate:
         try:
-            baseline = backtest.run(asset, strategy, goal, VALIDATION_DAYS)
+            baseline = backtest.run(asset, strategy, goal, validation_days(strategy))
         except Exception as e:  # no history (new listing, data outage): decide without it
             baseline = {"error": f"{type(e).__name__}: {e}"[:200]}
     bt_ok = baseline if baseline and "error" not in baseline else None
@@ -479,9 +507,14 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": (baseline or {}).get("error")})
 
     candidate_strategy = copy.deepcopy(strategy)
-    set_path(candidate_strategy, hyp["variable"], _bounded(strategy, hyp))
+    _set_path_creating(candidate_strategy, hyp["variable"], _bounded(strategy, hyp))
     try:
-        candidate = backtest.run(asset, candidate_strategy, goal, VALIDATION_DAYS)
+        rules.params(candidate_strategy)
+    except ValueError as e:  # e.g. entry.fast above entry.slow: never apply it unvalidated
+        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "invalid", "error": str(e)[:200]},
+                        rejected=True)
+    try:
+        candidate = backtest.run(asset, candidate_strategy, goal, validation_days(strategy))
     except Exception as e:
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
     b, c = _bt_brief(bt_ok), _bt_brief(candidate)
