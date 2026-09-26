@@ -33,6 +33,18 @@ TREND_FILTERS = ("off", "1h", "4h")
 ENTRY_BARS = 100          # candles fetched for the entry timeframe (RSI/ATR warm-up)
 TREND_BARS = TREND_EMA * 2 + 20
 
+# Keep file-edited strategies inside the same safe envelope used by reflection.py.
+# stop_atr_mult may be 0 to select the percentage stop fallback.
+PARAM_BOUNDS = {
+    "threshold": (5.0, 95.0),
+    "exit_rsi": (55.0, 90.0),
+    "stop_loss_pct": (0.2, 10.0),
+    "stop_atr_mult": (0.0, 6.0),
+    "take_profit_r": (0.5, 10.0),
+    "position_size_r": (0.1, 2.0),
+    "max_hold_min": (0.0, 2880.0),
+}
+
 # Cost model for simulated fills: % per side. Stocks fill at Alpaca (commission-free, real spread).
 DEFAULT_COSTS = {"crypto": {"fee_pct": 0.1, "slippage_pct": 0.02}, "stock": {"fee_pct": 0.0, "slippage_pct": 0.0}}
 
@@ -60,6 +72,10 @@ def params(strategy: dict) -> dict:
         raise ValueError(f"unsupported entry timeframe {p['timeframe']!r} ({', '.join(ENTRY_TIMEFRAMES)})")
     if p["trend_filter"] not in TREND_FILTERS:
         raise ValueError(f"unsupported trend filter {p['trend_filter']!r} ({', '.join(TREND_FILTERS)})")
+    for name, (lo, hi) in PARAM_BOUNDS.items():
+        value = p[name]
+        if not lo <= value <= hi:
+            raise ValueError(f"strategy {name!r} must be between {lo:g} and {hi:g}, got {value:g}")
     return p
 
 
@@ -161,6 +177,12 @@ def levels(p: dict, direction: str, fill: float, dist: float) -> tuple[float, fl
 
 def size(p: dict, equity: float, price: float, dist: float) -> float:
     """Units such that hitting the stop loses position_size_r % of equity; never leveraged."""
+    if equity <= 0:
+        return 0.0
+    if price <= 0:
+        raise ValueError(f"price must be positive, got {price:g}")
+    if dist <= 0:
+        raise ValueError(f"stop distance must be positive, got {dist:g}")
     return min((equity * p["position_size_r"] / 100) / dist, equity / price)
 
 
