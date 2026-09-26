@@ -45,7 +45,7 @@ TUNABLE = {
     "entry.threshold": (5.0, 95.0),
     "exit_rsi": (55.0, 90.0),
     "stop_loss_pct": (0.2, 10.0),
-    "stop_atr_mult": (0.5, 6.0),
+    "stop_atr_mult": (0.0, 6.0),
     "position_size_r": (0.1, 2.0),
     "take_profit_r": (0.5, 10.0),
     "max_hold_min": (0.0, 2880.0),
@@ -461,7 +461,11 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     except Exception as e:
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
     b, c = _bt_brief(bt_ok), _bt_brief(candidate)
-    # scores saturate at ±1, so an equal score is decided by the return
+    if c["oos_n"] < MIN_OOS_TRADES:
+        verdict = {"verdict": "rejected", "reason": "insufficient_oos_trades",
+                   "minimum_oos_trades": MIN_OOS_TRADES, "baseline": b, "candidate": c,
+                   "period": {"from": bt_ok["from"], "to": bt_ok["to"], "split": bt_ok["split"]}}
+        return Proposal(paths, strategy, hyp, m, s, backtest=verdict, rejected=True)
     better_all = (c["all_score"], c["all_return_pct"]) > (b["all_score"], b["all_return_pct"])
     accepted = c["oos_score"] >= b["oos_score"] and better_all
     verdict = {"verdict": "accepted" if accepted else "rejected", "baseline": b, "candidate": c,
