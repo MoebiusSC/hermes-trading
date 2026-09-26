@@ -1,6 +1,5 @@
 import unittest
 
-import numpy as np
 
 from hermes_trading import score, strategy
 
