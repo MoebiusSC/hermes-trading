@@ -1,7 +1,13 @@
 version: "01"
 entry:
   indicator: rsi
-  threshold: 30
+  threshold: 25
   direction: long
+  timeframe: "15m"
+exit_rsi: 75
+trend_filter: "off"
 stop_loss_pct: 2.0
+stop_atr_mult: 3.0
+take_profit_r: 3.0
 position_size_r: 0.5
+max_hold_min: 0

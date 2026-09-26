@@ -26,7 +26,7 @@ import ccxt
 import httpx
 import pandas as pd
 
-from . import config, remote
+from . import config, reflect, remote
 from .loop import RSI_PERIOD
 from .score import metrics, score
 from .storage import load_yaml, read_jsonl
@@ -41,6 +41,7 @@ CANDLE_TTL_S = 30
 TIMEFRAMES = {
     "1m": ("1m", CANDLES, "1Min", 5),
     "5m": ("5m", 288, "5Min", 10),
+    "15m": ("15m", 192, "15Min", 20),
     "1h": ("1h", 168, "1Hour", 40),
     "1d": ("1d", 180, "1Day", 400),
 }
@@ -97,29 +98,6 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def evaluate_changes(trades: list[dict], hypotheses: list[dict], goal: dict) -> list[dict]:
-    """Did each strategy change help? Compares the score of the `reflection_every` trades closed
-    before it with the ones opened under it (until the next change). Small samples: a hint only."""
-    n = int(goal["reflection_every"])
-    out = []
-    for h in hypotheses:
-        end = next((x["ts"] for x in hypotheses if x["ts"] > h["ts"]), None)
-        before = [t for t in trades if t["closed_at"] <= h["ts"]][-n:]
-        after = [t for t in trades if t["opened_at"] >= h["ts"] and (end is None or t["opened_at"] < end)][:n]
-        ev: dict = {"n_before": len(before), "n_after": len(after), "needed": n}
-        if before and (len(after) >= n or (end is not None and len(after) >= 2)):
-            sb, sa = score(before, goal), score(after, goal)
-            ev.update(status="done", score_before=sb, score_after=sa, improved=sa > sb,
-                      avg_before=sum(float(t["pnl_pct"]) for t in before) / len(before),
-                      avg_after=sum(float(t["pnl_pct"]) for t in after) / len(after))
-            if h.get("predicted_direction") in ("up", "down"):
-                ev["matched"] = (sa > sb) == (h["predicted_direction"] == "up")
-        else:
-            ev["status"] = "pending" if end is None else "insufficient"
-        out.append({**h, "evaluation": ev})
-    return out
-
-
 def _equity_curve(path: Path) -> list[dict]:
     points = read_jsonl(path)
     if len(points) > EQUITY_POINTS:
@@ -153,7 +131,7 @@ def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
                 "strategy": load_yaml(root / "strategy.yaml") if (root / "strategy.yaml").exists() else None,
                 "paper": _read_json(root / "paper_account.json") or {"equity": start, "position": None},
                 "trades": trades,
-                "hypotheses": evaluate_changes(trades, read_jsonl(root / "hypotheses.jsonl"), goal),
+                "hypotheses": reflect.evaluate_changes(trades, read_jsonl(root / "hypotheses.jsonl"), goal),
                 "metrics": metrics(trades),
                 "score": score(trades, goal),
                 "tick": (heartbeat.get("assets") or {}).get(asset),

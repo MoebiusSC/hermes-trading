@@ -20,3 +20,8 @@ async def fetch(symbol: str) -> dict:
         "closes": [c for _, c in rows],
         "last": rows[-1][1],
     }
+
+
+async def ohlcv(symbol: str, tf: str, limit: int) -> dict:
+    """OHLCV bars {t, open, high, low, close} from Alpaca, regular and extended hours as Alpaca sends them."""
+    return await alpaca.client().ohlcv(symbol, tf, limit)

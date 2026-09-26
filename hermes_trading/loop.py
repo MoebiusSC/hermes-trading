@@ -22,6 +22,7 @@ import pandas as pd
 from rich.console import Console
 
 from . import config, reflect
+from . import strategy as rules
 from .adapters import SchemaError, alpaca, check_schema, macro, news, onchain, price, stocks
 from .adapters.alpaca import AlpacaError
 from .storage import append_jsonl, load_yaml, write_json
@@ -44,7 +45,9 @@ REFLECT_EVERY_S = 1800
 SNAPSHOT_EVERY_S = 300
 START_EQUITY = config.CRYPTO_START_EQUITY  # per crypto asset
 RSI_PERIOD = 14
-RSI_EXIT = {"long": 70.0, "short": 30.0}
+# Portfolio limits (goal.yaml `risk:` overrides): crypto pairs move together, so many open
+# positions are close to one big bet.
+DEFAULT_RISK = {"max_open_positions": 6, "max_open_crypto": 4, "max_exposure_pct": 60}
 STOCK_WARMUP_MIN = 15  # no stock entries until RSI is built from today's bars
 MIN_ORDER_USD = 1.0  # Alpaca's fractional-order minimum
 
@@ -102,13 +105,17 @@ class AssetBook:
 
     ADAPTERS = CRYPTO_ADAPTERS
 
-    def __init__(self, asset: str, start_equity: float = START_EQUITY) -> None:
+    OHLCV = staticmethod(price.ohlcv)
+
+    def __init__(self, asset: str, start_equity: float = START_EQUITY, costs: tuple[float, float] = (0.0, 0.0)) -> None:
         self.asset = asset
         self.start_equity = start_equity
+        self.fee, self.slippage = costs  # fractions per side, applied to simulated fills
         self.paths = config.ensure_asset_state(asset)
         self.breakers = {name: Breaker() for name in self.ADAPTERS}
         self.paper = self._load_paper()
         self.lock = asyncio.Lock()  # a tick and a manual buy/sell never interleave on one asset
+        self.worker: Worker | None = None  # set by Worker; checks portfolio risk limits before entries
 
     # --- paper account -------------------------------------------------------
 
@@ -156,62 +163,54 @@ class AssetBook:
             "onchain": data.get("onchain", {}).get("metrics"),
         }
 
-    @staticmethod
-    def _check_strategy(strategy: dict) -> None:
-        entry = strategy["entry"]
-        if entry["indicator"] != "rsi":
-            raise ValueError(f"unsupported indicator {entry['indicator']!r} (only 'rsi')")
-        if entry["direction"] not in RSI_EXIT:
-            raise ValueError(f"unsupported direction {entry['direction']!r}")
+    async def signals(self, strategy: dict) -> dict:
+        """RSI and ATR on the strategy's timeframe and the trend filter, from closed candles."""
+        p = rules.params(strategy)
+        candles = rules.closed(await self.OHLCV(self.asset, p["timeframe"], rules.ENTRY_BARS), p["timeframe"])
+        if len(candles["close"]) < rules.RSI_PERIOD + 2:
+            raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles")
+        rsi_now = float(rules.rsi_series(candles["close"])[-1])
+        atr_now = float(rules.atr_series(candles["high"], candles["low"], candles["close"])[-1])
+        trend = None
+        if p["trend_filter"] != "off":
+            tc = rules.closed(await self.OHLCV(self.asset, p["trend_filter"], rules.TREND_BARS), p["trend_filter"])
+            trend = rules.trend_ok(p["direction"], tc["close"])
+        return {"p": p, "rsi": round(rsi_now, 4), "atr": None if np.isnan(atr_now) else atr_now, "trend": trend}
 
-    @staticmethod
-    def _exit_reason(pos: dict, last: float, rsi_value: float) -> str | None:
-        is_long = pos["direction"] == "long"
-        if (last <= pos["stop"]) if is_long else (last >= pos["stop"]):
-            return "stop_loss"
-        if (last >= pos["target"]) if is_long else (last <= pos["target"]):
-            return "take_profit"
-        if (rsi_value >= RSI_EXIT["long"]) if is_long else (rsi_value <= RSI_EXIT["short"]):
-            return "rsi_exit"
-        return None
-
-    @staticmethod
-    def _entry_fires(strategy: dict, rsi_value: float) -> bool:
-        entry = strategy["entry"]
-        threshold = float(entry["threshold"])
-        return rsi_value < threshold if entry["direction"] == "long" else rsi_value > threshold
-
-    def _size(self, strategy: dict, price_now: float) -> float:
-        stop_frac = float(strategy["stop_loss_pct"]) / 100
-        # position_size_r = % of equity put at risk if the stop is hit (0.5 -> 0.5%)
-        risk_frac = float(strategy["position_size_r"]) / 100
-        equity = self.paper["equity"]
-        return min((equity * risk_frac) / (price_now * stop_frac), equity / price_now)  # no leverage
-
-    def _position(self, strategy: dict, fill: float, qty: float, rsi_value: float, data: dict, **extra) -> dict:
-        direction = strategy["entry"]["direction"]
-        sign = 1 if direction == "long" else -1
-        stop_frac = float(strategy["stop_loss_pct"]) / 100
-        take_profit_r = float(strategy.get("take_profit_r", 2.0))
+    def _position(self, strategy: dict, fill: float, qty: float, sig: dict, data: dict, **extra) -> dict:
+        p = sig["p"]
+        dist = rules.stop_distance(p, fill, sig.get("atr"))
+        stop, target = rules.levels(p, p["direction"], fill, dist)
         return {
             "id": uuid.uuid4().hex[:12],
             "asset": self.asset,
-            "direction": direction,
+            "direction": p["direction"],
             "opened_at": utcnow(),
+            "opened_ms": int(time.time() * 1000),
             "entry_price": fill,
             "qty": qty,
-            "stop": fill * (1 - sign * stop_frac),
-            "target": fill * (1 + sign * stop_frac * take_profit_r),
+            "stop": stop,
+            "target": target,
             "strategy_version": str(strategy["version"]),
-            "rsi_at_entry": round(rsi_value, 2),
+            "rsi_at_entry": round(sig["rsi"], 2),
+            "rsi_timeframe": p["timeframe"],
+            "atr_at_entry": sig.get("atr"),
+            "trend_ok": sig.get("trend"),
+            "fees": round(qty * fill * self.fee, 6),  # entry side; the exit side is added on close
             "context": self._context(data),
             **extra,
         }
 
+    def _entry_size(self, sig: dict, price_now: float) -> float:
+        dist = rules.stop_distance(sig["p"], price_now, sig.get("atr"))
+        return rules.size(sig["p"], self.paper["equity"], price_now, dist)
+
     async def _record_close(self, exit_price: float, reason: str, rsi_value: float | None, **extra) -> None:
         pos = self.paper["position"]
         sign = 1 if pos["direction"] == "long" else -1
-        pnl = sign * pos["qty"] * (exit_price - pos["entry_price"])
+        gross = sign * pos["qty"] * (exit_price - pos["entry_price"])
+        fees = pos.get("fees", 0.0) + pos["qty"] * exit_price * self.fee
+        pnl = gross - fees
         equity_before = self.paper["equity"]
         self.paper["equity"] = equity_before + pnl
         trade = {
@@ -221,6 +220,8 @@ class AssetBook:
             "exit_price": exit_price,
             "exit_reason": reason,
             "rsi_at_exit": round(rsi_value, 2) if rsi_value is not None else None,
+            "gross_pnl": round(gross, 4),
+            "fees": round(fees, 4),
             "pnl": round(pnl, 4),
             "pnl_pct": pnl / equity_before,
             "equity_after": round(self.paper["equity"], 4),
@@ -231,22 +232,41 @@ class AssetBook:
         self.paper["position"] = None
         self._save_paper()
 
-    # --- crypto execution: simulated at the last price -----------------------
+    def _risk_block(self, notional: float) -> str | None:
+        """A reason to skip this entry because of portfolio limits; reserves the slot otherwise."""
+        return self.worker.risk_check(self, notional) if self.worker else None
 
-    async def decide(self, strategy: dict, last: float, rsi_value: float, data: dict) -> str:
-        self._check_strategy(strategy)
+    def _release(self) -> None:
+        if self.worker:
+            self.worker.release(self.asset)
+
+    # --- crypto execution: simulated at the last price, with fees and slippage --------
+
+    async def decide(self, strategy: dict, last: float, sig: dict, data: dict) -> str:
+        p = sig["p"]
         pos = self.paper["position"]
         if pos:
-            reason = self._exit_reason(pos, last, rsi_value)
+            reason = rules.exit_reason(pos, p, last, sig["rsi"], time.time() * 1000)
             if reason:
-                await self._record_close(last, reason, rsi_value)
+                side = "sell" if pos["direction"] == "long" else "buy"
+                await self._record_close(rules.fill(last, side, self.slippage), reason, sig["rsi"])
                 return f"closed {pos['direction']} ({reason})"
             return f"holding {pos['direction']}"
-        if self._entry_fires(strategy, rsi_value):
-            self.paper["position"] = self._position(strategy, last, self._size(strategy, last), rsi_value, data)
+        if not rules.entry_fires(p, sig["rsi"], sig["trend"]):
+            if p["trend_filter"] != "off" and sig["trend"] is not True and rules.entry_fires({**p, "trend_filter": "off"}, sig["rsi"], None):
+                return "no signal (against the trend)"
+            return "no signal"
+        fill_price = rules.fill(last, "buy" if p["direction"] == "long" else "sell", self.slippage)
+        qty = self._entry_size(sig, fill_price)
+        blocked = self._risk_block(qty * fill_price)
+        if blocked:
+            return f"skip: {blocked}"
+        try:
+            self.paper["position"] = self._position(strategy, fill_price, qty, sig, data)
             self._save_paper()
-            return f"opened {strategy['entry']['direction']}"
-        return "no signal"
+        finally:
+            self._release()
+        return f"opened {p['direction']}"
 
     # --- one tick ------------------------------------------------------------
 
@@ -270,12 +290,15 @@ class AssetBook:
                 if not price_data:
                     summary["decision"] = "skip: no price data"
                 else:
-                    rsi_value = rsi(price_data["closes"])
+                    sig = await self.signals(strategy)
                     summary.update(
                         last_price=price_data["last"],
                         price_source=price_data["source"],
-                        rsi=rsi_value,
-                        decision=await self.decide(strategy, price_data["last"], rsi_value, data),
+                        rsi=sig["rsi"],
+                        rsi_timeframe=sig["p"]["timeframe"],
+                        atr=sig["atr"],
+                        trend=sig["trend"],
+                        decision=await self.decide(strategy, price_data["last"], sig, data),
                     )
         except SchemaError:
             raise
@@ -306,8 +329,9 @@ class AssetBook:
 
     async def _manual_sell(self, pos: dict) -> str:
         last, rsi_value = await self._quote()
-        await self._record_close(last, "manual_close", rsi_value)
-        return f"{pos['direction']} cerrado a {last:g} (ejecución simulada)"
+        exit_fill = rules.fill(last, "sell" if pos["direction"] == "long" else "buy", self.slippage)
+        await self._record_close(exit_fill, "manual_close", rsi_value)
+        return f"{pos['direction']} cerrado a {exit_fill:g} (ejecución simulada, con comisión)"
 
     async def set_strategy(self, changes: dict) -> str:
         """Hand-edited strategy settings. They apply from the next tick; an open position's stop
@@ -318,12 +342,10 @@ class AssetBook:
                 return "sin cambios"
             pos = self.paper["position"]
             note = ""
-            if pos and any(r["variable"] in ("stop_loss_pct", "take_profit_r") for r in records):
-                strategy = load_yaml(self.paths.strategy)
-                sign = 1 if pos["direction"] == "long" else -1
-                stop_frac = float(strategy["stop_loss_pct"]) / 100
-                pos["stop"] = pos["entry_price"] * (1 - sign * stop_frac)
-                pos["target"] = pos["entry_price"] * (1 + sign * stop_frac * float(strategy.get("take_profit_r", 2.0)))
+            if pos and any(r["variable"] in ("stop_loss_pct", "stop_atr_mult", "take_profit_r") for r in records):
+                p = rules.params(load_yaml(self.paths.strategy))
+                dist = rules.stop_distance(p, pos["entry_price"], pos.get("atr_at_entry"))
+                pos["stop"], pos["target"] = rules.levels(p, pos["direction"], pos["entry_price"], dist)
                 self._save_paper()
                 note = f"; la posición abierta ahora sale en stop {pos['stop']:g} / objetivo {pos['target']:g}"
             changed = ", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records)
@@ -334,14 +356,14 @@ class AssetBook:
             if self.paper["position"]:
                 raise ValueError(f"{self.asset} ya tiene una posición abierta")
             strategy = load_yaml(self.paths.strategy)
-            self._check_strategy(strategy)
-            return await self._manual_buy(strategy)
+            return await self._manual_buy(strategy, await self.signals(strategy))
 
-    async def _manual_buy(self, strategy: dict) -> str:
-        last, rsi_value = await self._quote()
-        self.paper["position"] = self._position(strategy, last, self._size(strategy, last), rsi_value, {}, manual=True)
+    async def _manual_buy(self, strategy: dict, sig: dict) -> str:
+        last, _ = await self._quote()
+        fill_price = rules.fill(last, "buy" if sig["p"]["direction"] == "long" else "sell", self.slippage)
+        self.paper["position"] = self._position(strategy, fill_price, self._entry_size(sig, fill_price), sig, {}, manual=True)
         self._save_paper()
-        return f"{strategy['entry']['direction']} abierto a {last:g} (ejecución simulada)"
+        return f"{sig['p']['direction']} abierto a {fill_price:g} (ejecución simulada, con comisión)"
 
 
 class StockBook(AssetBook):
@@ -354,9 +376,10 @@ class StockBook(AssetBook):
     next trading day."""
 
     ADAPTERS = STOCK_ADAPTERS
+    OHLCV = staticmethod(stocks.ohlcv)
 
-    def __init__(self, asset: str, start_equity: float) -> None:
-        super().__init__(asset, start_equity)
+    def __init__(self, asset: str, start_equity: float, costs: tuple[float, float] = (0.0, 0.0)) -> None:
+        super().__init__(asset, start_equity, costs)
         self.session: dict = {}
 
     async def gate(self) -> dict | None:
@@ -365,9 +388,9 @@ class StockBook(AssetBook):
             return {"market": "closed", "decision": f"market closed · opens {self.session['next_open'][:16].replace('T', ' ')} ET"}
         return None
 
-    async def decide(self, strategy: dict, last: float, rsi_value: float, data: dict) -> str:
-        self._check_strategy(strategy)
-        if strategy["entry"]["direction"] != "long":
+    async def decide(self, strategy: dict, last: float, sig: dict, data: dict) -> str:
+        p, rsi_value = sig["p"], sig["rsi"]
+        if p["direction"] != "long":
             raise ValueError("stocks are long-only here (shorting is disabled on the Alpaca account)")
         broker = alpaca.client()
         held = await broker.position(self.asset)
@@ -378,7 +401,7 @@ class StockBook(AssetBook):
         if pos:
             if pos.get("exit_blocked_on") == self.session["date"]:
                 return "holding long (exit blocked by day-trade rule until next session)"
-            reason = self._exit_reason(pos, last, rsi_value)
+            reason = rules.exit_reason(pos, p, last, rsi_value, time.time() * 1000)
             if not reason:
                 return "holding long"
             return await self._sell(reason, rsi_value)
@@ -388,9 +411,17 @@ class StockBook(AssetBook):
         minutes = self.session.get("minutes_since_open")
         if minutes is not None and minutes < STOCK_WARMUP_MIN:
             return f"warming up · entries from {STOCK_WARMUP_MIN} min after the open"
-        if not self._entry_fires(strategy, rsi_value):
+        if not rules.entry_fires(p, rsi_value, sig["trend"]):
+            if p["trend_filter"] != "off" and sig["trend"] is not True and rules.entry_fires({**p, "trend_filter": "off"}, rsi_value, None):
+                return "no signal (against the trend)"
             return "no signal"
-        return await self._buy(strategy, last, rsi_value, data)
+        blocked = self._risk_block(self._entry_size(sig, last) * last)
+        if blocked:
+            return f"skip: {blocked}"
+        try:
+            return await self._buy(strategy, last, sig, data)
+        finally:
+            self._release()
 
     async def _require_open_market(self) -> None:
         self.session = await alpaca.client().session()
@@ -406,20 +437,20 @@ class StockBook(AssetBook):
             return result.replace("closed long (manual_close) @", "long vendido en Alpaca a")
         raise ValueError(result)
 
-    async def _manual_buy(self, strategy: dict) -> str:
-        if strategy["entry"]["direction"] != "long":
+    async def _manual_buy(self, strategy: dict, sig: dict) -> str:
+        if sig["p"]["direction"] != "long":
             raise ValueError("las acciones y los ETFs solo operan en long")
         await self._require_open_market()
         if await alpaca.client().position(self.asset) is not None:
             raise ValueError(f"Alpaca ya tiene {self.asset} fuera de este worker")
-        last, rsi_value = await self._quote()
-        result = await self._buy(strategy, last, rsi_value, {}, manual=True)
+        last, _ = await self._quote()
+        result = await self._buy(strategy, last, sig, {}, manual=True)
         if not result.startswith("opened"):
             raise ValueError(result)
         return result.replace("opened long", "long comprado en Alpaca:").replace(" @ ", " a ")
 
-    async def _buy(self, strategy: dict, last: float, rsi_value: float, data: dict, **extra) -> str:
-        qty = math.floor(self._size(strategy, last) * 1e6) / 1e6
+    async def _buy(self, strategy: dict, last: float, sig: dict, data: dict, **extra) -> str:
+        qty = math.floor(self._entry_size(sig, last) * 1e6) / 1e6
         if qty * last < MIN_ORDER_USD:
             return f"skip: order ${qty * last:.2f} is below Alpaca's ${MIN_ORDER_USD:.0f} minimum"
         broker = alpaca.client()
@@ -430,7 +461,7 @@ class StockBook(AssetBook):
             return f"entry rejected: {e.message}"[:200]
         fill, filled_qty = float(order["filled_avg_price"]), float(order["filled_qty"])
         self.paper["position"] = self._position(
-            strategy, fill, filled_qty, rsi_value, data, broker={"entry_order_id": order["id"], "client_order_id": client_id}, **extra
+            strategy, fill, filled_qty, sig, data, broker={"entry_order_id": order["id"], "client_order_id": client_id}, **extra
         )
         self._save_paper()
         return f"opened long {filled_qty:g} @ {fill:.2f}"
@@ -465,12 +496,18 @@ class StockBook(AssetBook):
 
 def make_book(asset: str, goal: dict) -> AssetBook:
     equity = config.start_equity(asset, goal)
-    return StockBook(asset, equity) if config.is_stock(asset) else AssetBook(asset, equity)
+    stock = config.is_stock(asset)
+    # Stocks fill at Alpaca (real prices, commission-free), so only crypto gets simulated costs
+    costs = rules.costs(goal, stock) if not stock else (0.0, 0.0)
+    return StockBook(asset, equity, costs) if stock else AssetBook(asset, equity, costs)
 
 
 class Worker:
     def __init__(self, assets: list[str], goal: dict) -> None:
         self.books = [make_book(asset, goal) for asset in assets]
+        for book in self.books:
+            book.worker = self
+        self._reserved: set[str] = set()  # assets between a passed risk check and their position being recorded
         self.loop: asyncio.AbstractEventLoop | None = None  # set in run(); the state server posts actions to it
         self.reflection: dict = {}  # last reflection cycle, reported in the heartbeat
         self.last_prices: dict[str, float] = {}  # stocks keep their last price while the market is closed
@@ -527,6 +564,28 @@ class Worker:
         except OSError as e:
             console.log(f"[red]equity snapshot failed:[/] {e}")
 
+    def risk_check(self, book: AssetBook, notional: float) -> str | None:
+        """Portfolio limits for a new entry (goal.yaml `risk:`). Returns why it's refused, or
+        None and reserves the slot until release()."""
+        risk = {**DEFAULT_RISK, **(load_yaml(config.GOAL_FILE).get("risk") or {})}
+        busy = [b for b in self.books if b is not book and (b.paper["position"] or b.asset in self._reserved)]
+        if len(busy) >= int(risk["max_open_positions"]):
+            return f"risk limit: {len(busy)} positions open (max {risk['max_open_positions']})"
+        if not config.is_stock(book.asset):
+            crypto = [b for b in busy if not config.is_stock(b.asset)]
+            if len(crypto) >= int(risk["max_open_crypto"]):
+                return f"risk limit: {len(crypto)} crypto positions open (max {risk['max_open_crypto']})"
+        invested = sum(b.paper["position"]["qty"] * b.paper["position"]["entry_price"] for b in busy if b.paper["position"])
+        equity = sum(b.paper["equity"] for b in self.books)
+        exposure = (invested + notional) / equity * 100 if equity else 0
+        if exposure > float(risk["max_exposure_pct"]):
+            return f"risk limit: exposure would reach {exposure:.0f}% (max {risk['max_exposure_pct']}%)"
+        self._reserved.add(book.asset)
+        return None
+
+    def release(self, asset: str) -> None:
+        self._reserved.discard(asset)
+
     def book(self, asset: str) -> AssetBook:
         for book in self.books:
             if book.asset == asset:
@@ -545,6 +604,7 @@ class Worker:
             raise ValueError(f"no hay datos de precio para {asset}: {e}"[:300]) from e
         config.add_goal_asset(config.GOAL_FILE, asset)
         book = make_book(asset, load_yaml(config.GOAL_FILE))
+        book.worker = self
         self.books.append(book)
         message = f"{asset} añadido con una cuenta simulada de ${book.start_equity:,.0f}".replace(",", ".")
         self.event("asset_added", message, asset)

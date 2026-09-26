@@ -6,6 +6,12 @@
 
 Runs every asset in goal.yaml (or just --asset X). Each asset has its own strategy, trades and
 cadence. Add --force to reflect before `reflection_every` new trades have closed.
+
+Each cycle, per asset that is due:
+  1. if the last automatic change has been measured and made things worse, it is reverted;
+  2. otherwise a hypothesis is asked for (Hermes, the LLM, or the fallback rule) and checked with a
+     walk-forward backtest (backtest.py): it is applied only if it doesn't lower the out-of-sample
+     score and improves the whole-period score. A rejected hypothesis is logged, not applied.
 The Hermes command is DEFAULT_HERMES_CMD + `--query-file <prompt>`; override the base with HERMES_CMD.
 --llm sends the same prompt to LLM_BASE_URL's /chat/completions with LLM_MODEL (default: Gemini's
 free tier). It is what the Railway worker uses: the `hermes` CLI only signs in interactively,
@@ -30,24 +36,36 @@ from typing import NamedTuple
 import httpx
 
 from . import config
+from . import strategy as rules
 from .score import metrics, score
 from .storage import append_jsonl, dump_yaml, load_yaml, read_jsonl
 
 # The only variables a reflection may touch, with hard bounds.
 TUNABLE = {
     "entry.threshold": (5.0, 95.0),
+    "exit_rsi": (55.0, 90.0),
     "stop_loss_pct": (0.2, 10.0),
+    "stop_atr_mult": (0.5, 6.0),
     "position_size_r": (0.1, 2.0),
     "take_profit_r": (0.5, 10.0),
+    "max_hold_min": (0.0, 2880.0),
 }
-TUNABLE_DEFAULTS = {"take_profit_r": 2.0}
+# Values for fields an older strategy.yaml doesn't have (the original behaviour; see strategy.py)
+TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0}
 # Largest move allowed per cycle, so one reflection nudges a variable instead of replacing it.
 MAX_STEP = {
     "entry.threshold": 5.0,
+    "exit_rsi": 5.0,
     "stop_loss_pct": 0.5,
+    "stop_atr_mult": 0.5,
     "position_size_r": 0.25,
     "take_profit_r": 0.5,
+    "max_hold_min": 120.0,
 }
+# Settings only changed by hand (dashboard) or by a migration, never by a reflection
+CHOICES = {"entry.direction": ("long", "short"), "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
+AUTO_MODES = ("hermes", "llm", "fallback", "revert")  # changes the reflection made (not manual/migration)
+REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
 HERMES_TRADE_WINDOW = 25
 DEFAULT_HERMES_CMD = (
     "hermes chat -Q --oneshot -t todo --ignore-rules --source tool --max-turns 3 --run-budget 300"
@@ -63,6 +81,13 @@ def get_path(d: dict, dotted: str):
     for part in dotted.split("."):
         d = d[part]
     return d
+
+
+def _set_path_creating(d: dict, dotted: str, value) -> None:
+    *parents, leaf = dotted.split(".")
+    for part in parents:
+        d = d.setdefault(part, {})
+    d[leaf] = value
 
 
 def set_path(d: dict, dotted: str, value) -> None:
@@ -102,14 +127,31 @@ def fallback_hypothesis(strategy: dict, goal: dict, m: dict) -> dict | None:
     return None
 
 
-def build_prompt(asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float) -> str:
+def build_prompt(asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float, bt: dict | None = None) -> str:
     trade_lines = "\n".join(json.dumps(t) for t in trades)
     market = (
         "a US-listed ETF/stock, long only, traded in regular market hours via an Alpaca paper account"
         if config.is_stock(asset)
         else "a crypto spot pair traded 24/7"
     )
-    return f"""You are tuning a paper-trading strategy for {asset} ({market}; 1-minute candles). Propose exactly ONE change.
+    fee, slip = rules.costs(goal, config.is_stock(asset))
+    backtest_text = "not available"
+    if bt:
+        backtest_text = json.dumps({k: bt[k] for k in ("from", "to", "buy_hold_pct", "all", "in_sample", "out_of_sample")})
+    return f"""You are tuning a paper-trading strategy for {asset} ({market}). Propose exactly ONE change.
+
+How the strategy trades (strategy.yaml fields):
+- entry: RSI(14) on entry.timeframe candles; long enters when RSI < entry.threshold (short: RSI > threshold),
+  only when trend_filter (off/1h/4h EMA50) agrees.
+- exits: stop, target (take_profit_r x stop distance), RSI reaching exit_rsi (short: 100 - exit_rsi), or after
+  max_hold_min minutes (0 = no limit). Stop distance = stop_atr_mult x ATR(14) when stop_atr_mult > 0,
+  otherwise stop_loss_pct % of the price.
+- size: position_size_r % of the account is lost if the stop is hit.
+- costs per side: fee {fee * 100:.3f}%, slippage {slip * 100:.3f}% (already included in all P&L below).
+
+Walk-forward backtest of the CURRENT strategy on recent history (in sample = first 70%, out of sample = last 30%):
+{backtest_text}
+Your change will be backtested the same way and applied only if it holds out of sample.
 
 Goal (goal.yaml):
 {json.dumps(goal, indent=2)}
@@ -145,7 +187,7 @@ def parse_hypothesis(text: str) -> dict:
 
 
 def hermes_hypothesis(
-    asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float
+    asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float, bt: dict | None = None
 ) -> dict:
     # One-shot, text-only: no terminal/file/code tools, bounded turns and wall-clock.
     cmd = shlex.split(config.env("HERMES_CMD", DEFAULT_HERMES_CMD))
@@ -154,7 +196,7 @@ def hermes_hypothesis(
         raise RuntimeError(f"`{cmd[0]}` not found on PATH — install Hermes or use --fallback.")
     with tempfile.TemporaryDirectory() as tmp:
         prompt_file = Path(tmp) / "prompt.txt"
-        prompt_file.write_text(build_prompt(asset, strategy, goal, trades, m, s), encoding="utf-8")
+        prompt_file.write_text(build_prompt(asset, strategy, goal, trades, m, s, bt), encoding="utf-8")
         proc = subprocess.run(
             [exe, *cmd[1:], "--query-file", str(prompt_file)],
             capture_output=True,
@@ -171,7 +213,7 @@ def hermes_hypothesis(
 
 
 def llm_hypothesis(
-    asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float
+    asset: str, strategy: dict, goal: dict, trades: list[dict], m: dict, s: float, bt: dict | None = None
 ) -> dict:
     key = config.env("LLM_API_KEY")
     if not key:
@@ -179,7 +221,7 @@ def llm_hypothesis(
     url = config.env("LLM_BASE_URL", DEFAULT_LLM_BASE_URL).rstrip("/") + "/chat/completions"
     body = {
         "model": config.env("LLM_MODEL", DEFAULT_LLM_MODEL),
-        "messages": [{"role": "user", "content": build_prompt(asset, strategy, goal, trades, m, s)}],
+        "messages": [{"role": "user", "content": build_prompt(asset, strategy, goal, trades, m, s, bt)}],
     }
     # Free tiers allow a few requests per minute: wait out 429s (and gateway blips) and retry;
     # anything else fails the asset.
@@ -201,7 +243,8 @@ def llm_hypothesis(
 
 
 def apply(
-    paths: config.AssetPaths, strategy: dict, hyp: dict, mode: str, m: dict, s: float
+    paths: config.AssetPaths, strategy: dict, hyp: dict, mode: str, m: dict, s: float,
+    backtest: dict | None = None, unclamped: bool = False,
 ) -> dict | None:
     variable = hyp["variable"]
     if variable not in TUNABLE:
@@ -212,7 +255,7 @@ def apply(
     except KeyError:
         old = TUNABLE_DEFAULTS[variable]
     requested = float(hyp["new_value"])
-    step = MAX_STEP[variable]
+    step = float("inf") if unclamped else MAX_STEP[variable]  # a revert goes straight back
     new = min(max(requested, float(old) - step, lo), float(old) + step, hi)
     new = round(new, 4)
     if isinstance(old, int) and new.is_integer():
@@ -244,11 +287,14 @@ def apply(
         "metrics_before": m,
         "score_before": s,
     }
+    if backtest:
+        record["backtest"] = backtest
     append_jsonl(paths.hypotheses, record)
     return record
 
 
-def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[dict]:
+def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool, mode: str = "manual",
+                 rationale: str = "Cambiado a mano desde el dashboard.") -> list[dict]:
     """Settings changed by hand from the dashboard. Same bounds, versioning and hypothesis log as a
     reflection, but no per-cycle step limit and several variables at once. The log entry also
     restarts the reflection cadence, so the new settings get `reflection_every` trades first."""
@@ -256,11 +302,11 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[d
     updated = copy.deepcopy(strategy)
     diffs = []
     for variable, requested in changes.items():
-        if variable == "entry.direction":
+        if variable in CHOICES:
             new = str(requested)
-            if new not in ("long", "short"):
-                raise ValueError("la dirección debe ser long o short")
-            if stock and new != "long":
+            if new not in CHOICES[variable]:
+                raise ValueError(f"{variable} debe ser uno de: {', '.join(CHOICES[variable])}")
+            if variable == "entry.direction" and stock and new != "long":
                 raise ValueError("las acciones y los ETFs solo operan en long")
         elif variable in TUNABLE:
             lo, hi = TUNABLE[variable]
@@ -271,15 +317,15 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[d
             if not lo <= new <= hi:
                 raise ValueError(f"{variable} debe estar entre {lo:g} y {hi:g}")
         else:
-            raise ValueError(f"{variable!r} no se puede cambiar; permitidos: entry.direction, {', '.join(sorted(TUNABLE))}")
+            raise ValueError(f"{variable!r} no se puede cambiar; permitidos: {', '.join(sorted(CHOICES) + sorted(TUNABLE))}")
         try:
             old = get_path(strategy, variable)
         except KeyError:
-            old = TUNABLE_DEFAULTS[variable]
+            old = TUNABLE_DEFAULTS[variable] if variable in TUNABLE_DEFAULTS else {"entry.timeframe": "1m", "trend_filter": "off"}.get(variable)
         if isinstance(old, int) and isinstance(new, float) and new.is_integer():
             new = int(new)
         if new != old:
-            set_path(updated, variable, new)
+            _set_path_creating(updated, variable, new)
             diffs.append((variable, old, new))
     if not diffs:
         return []
@@ -292,15 +338,42 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[d
     records = []
     for variable, old, new in diffs:
         record = {
-            "ts": ts, "asset": paths.asset, "mode": "manual",
+            "ts": ts, "asset": paths.asset, "mode": mode,
             "from_version": prior_version, "to_version": updated["version"],
             "variable": variable, "old_value": old, "new_value": new,
             "requested_value": new, "clamped": False,
-            "rationale": "Cambiado a mano desde el dashboard.", "predicted_direction": None,
+            "rationale": rationale, "predicted_direction": None,
         }
         append_jsonl(paths.hypotheses, record)
         records.append(record)
     return records
+
+
+def evaluate_changes(trades: list[dict], hypotheses: list[dict], goal: dict) -> list[dict]:
+    """Did each strategy change help? Compares the score of the `reflection_every` trades closed
+    before it with the ones opened under it (until the next change). Small samples: a hint only."""
+    n = int(goal["reflection_every"])
+    applied = [h for h in hypotheses if not h.get("rejected")]
+    out = []
+    for h in hypotheses:
+        if h.get("rejected"):
+            out.append({**h, "evaluation": {"status": "rejected"}})
+            continue
+        end = next((x["ts"] for x in applied if x["ts"] > h["ts"]), None)
+        before = [t for t in trades if t["closed_at"] <= h["ts"]][-n:]
+        after = [t for t in trades if t["opened_at"] >= h["ts"] and (end is None or t["opened_at"] < end)][:n]
+        ev: dict = {"n_before": len(before), "n_after": len(after), "needed": n}
+        if before and (len(after) >= n or (end is not None and len(after) >= 2)):
+            sb, sa = score(before, goal), score(after, goal)
+            ev.update(status="done", score_before=sb, score_after=sa, improved=sa > sb,
+                      avg_before=sum(float(t["pnl_pct"]) for t in before) / len(before),
+                      avg_after=sum(float(t["pnl_pct"]) for t in after) / len(after))
+            if h.get("predicted_direction") in ("up", "down"):
+                ev["matched"] = (sa > sb) == (h["predicted_direction"] == "up")
+        else:
+            ev["status"] = "pending" if end is None else "insufficient"
+        out.append({**h, "evaluation": ev})
+    return out
 
 
 class Proposal(NamedTuple):
@@ -309,9 +382,31 @@ class Proposal(NamedTuple):
     hyp: dict
     m: dict
     s: float
+    mode: str = ""           # overrides the cycle's mode (e.g. "revert")
+    backtest: dict | None = None
+    rejected: bool = False
 
 
-def propose(asset: str, goal: dict, mode: str, force: bool) -> Proposal | str:
+def _bt_brief(r: dict) -> dict:
+    return {"all_score": r["all"]["score"], "all_return_pct": r["all"]["return_pct"], "all_n": r["all"]["n"],
+            "oos_score": r["out_of_sample"]["score"], "oos_return_pct": r["out_of_sample"]["return_pct"], "oos_n": r["out_of_sample"]["n"]}
+
+
+def _revert_candidate(trades: list[dict], hypotheses: list[dict], goal: dict) -> dict | None:
+    """The last applied automatic change, if it has been measured and made things clearly worse."""
+    applied = [h for h in evaluate_changes(trades, hypotheses, goal) if not h.get("rejected")]
+    if not applied:
+        return None
+    last = applied[-1]
+    ev = last["evaluation"]
+    if last.get("mode") not in AUTO_MODES or last.get("mode") == "revert" or ev.get("status") != "done":
+        return None
+    if ev["score_after"] < ev["score_before"] - REVERT_MARGIN:
+        return last
+    return None
+
+
+def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = True) -> Proposal | str:
     """Read an asset's state and ask for one change. Returns a one-line report when there's
     nothing to apply. Writes nothing, so it can run while the worker trades."""
     paths = config.asset_paths(asset)
@@ -329,19 +424,95 @@ def propose(asset: str, goal: dict, mode: str, force: bool) -> Proposal | str:
 
     m = metrics(trades)
     s = score(trades, goal)
+    bad = _revert_candidate(trades, hypotheses, goal)
+    if bad:
+        ev = bad["evaluation"]
+        hyp = {"variable": bad["variable"], "new_value": bad["old_value"], "predicted_direction": "up",
+               "rationale": f"Revert v{bad['from_version']} → v{bad['to_version']}: score fell from {ev['score_before']:.2f} "
+                            f"to {ev['score_after']:.2f} over the {ev['n_after']} trades under it."}
+        return Proposal(paths, strategy, hyp, m, s, mode="revert")
+
+    from . import backtest  # network + history; imported here so the dashboard doesn't pay for it
+
+    baseline = None
+    if validate:
+        try:
+            baseline = backtest.run(asset, strategy, goal)
+        except Exception as e:  # no history (new listing, data outage): decide without it
+            baseline = {"error": f"{type(e).__name__}: {e}"[:200]}
+    bt_ok = baseline if baseline and "error" not in baseline else None
     if mode == "hermes":
-        hyp = hermes_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s)
+        hyp = hermes_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s, bt_ok)
     elif mode == "llm":
-        hyp = llm_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s)
+        hyp = llm_hypothesis(asset, strategy, goal, trades[-HERMES_TRADE_WINDOW:], m, s, bt_ok)
     else:
         hyp = fallback_hypothesis(strategy, goal, m)
     if hyp is None:
         return f"targets met (score {s}) — no change this cycle."
-    return Proposal(paths, strategy, hyp, m, s)
+    if not validate:
+        return Proposal(paths, strategy, hyp, m, s)
+    if not bt_ok:
+        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": (baseline or {}).get("error")})
+
+    candidate_strategy = copy.deepcopy(strategy)
+    set_path(candidate_strategy, hyp["variable"], _bounded(strategy, hyp))
+    try:
+        candidate = backtest.run(asset, candidate_strategy, goal)
+    except Exception as e:
+        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
+    b, c = _bt_brief(bt_ok), _bt_brief(candidate)
+    # scores saturate at ±1, so an equal score is decided by the return
+    better_all = (c["all_score"], c["all_return_pct"]) > (b["all_score"], b["all_return_pct"])
+    accepted = c["oos_score"] >= b["oos_score"] and better_all
+    verdict = {"verdict": "accepted" if accepted else "rejected", "baseline": b, "candidate": c,
+               "period": {"from": bt_ok["from"], "to": bt_ok["to"], "split": bt_ok["split"]}}
+    return Proposal(paths, strategy, hyp, m, s, backtest=verdict, rejected=not accepted)
+
+
+def _bounded(strategy: dict, hyp: dict):
+    """The value apply() would set: within bounds and one MAX_STEP of the current value."""
+    variable = hyp["variable"]
+    if variable not in TUNABLE:
+        raise ValueError(f"{variable!r} is not tunable; allowed: {sorted(TUNABLE)}")
+    lo, hi = TUNABLE[variable]
+    try:
+        old = float(get_path(strategy, variable))
+    except KeyError:
+        old = TUNABLE_DEFAULTS[variable]
+    step = MAX_STEP[variable]
+    return round(min(max(float(hyp["new_value"]), old - step, lo), old + step, hi), 4)
+
+
+def reject(p: Proposal, mode: str) -> dict:
+    """Log a hypothesis the backtest refused, without touching the strategy. It restarts the cadence."""
+    record = {
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "asset": p.paths.asset, "mode": mode, "rejected": True,
+        "from_version": str(p.strategy["version"]), "to_version": str(p.strategy["version"]),
+        "variable": p.hyp["variable"], "old_value": _current(p.strategy, p.hyp["variable"]),
+        "new_value": _bounded(p.strategy, p.hyp), "requested_value": p.hyp["new_value"], "clamped": False,
+        "rationale": p.hyp.get("rationale", ""), "predicted_direction": p.hyp.get("predicted_direction"),
+        "backtest": p.backtest, "metrics_before": p.m, "score_before": p.s,
+    }
+    append_jsonl(p.paths.hypotheses, record)
+    return record
+
+
+def _current(strategy: dict, variable: str):
+    try:
+        return get_path(strategy, variable)
+    except KeyError:
+        return TUNABLE_DEFAULTS.get(variable)
 
 
 def apply_proposal(p: Proposal, mode: str) -> str:
-    record = apply(p.paths, p.strategy, p.hyp, mode, p.m, p.s)
+    mode = p.mode or mode
+    if p.rejected:
+        r = reject(p, mode)
+        c, b = p.backtest["candidate"], p.backtest["baseline"]
+        return (f"rejected by backtest: {r['variable']} {r['old_value']} → {r['new_value']} "
+                f"(out-of-sample score {b['oos_score']:+.2f} → {c['oos_score']:+.2f}, whole period {b['all_score']:+.2f} → {c['all_score']:+.2f})")
+    record = apply(p.paths, p.strategy, p.hyp, mode, p.m, p.s, backtest=p.backtest, unclamped=mode == "revert")
     if record is None:
         return f"{p.hyp['variable']} is already at {p.hyp['new_value']} or its bound — no change."
     clamp_note = f" [requested {record['requested_value']}, clamped to max step]" if record["clamped"] else ""

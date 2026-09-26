@@ -384,7 +384,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
           </section>
           <section class="panel">
             <div class="chart-head">
-              <div><h2>RSI (14) · 1 minuto</h2><div class="sub" id="rsi-sub">Niveles de entrada y salida de la estrategia actual</div></div>
+              <div><h2 id="rsi-title">RSI (14)</h2><div class="sub" id="rsi-sub">Niveles de entrada y salida de la estrategia actual</div></div>
             </div>
             <div class="chart" id="rsi-chart"></div>
           </section>
@@ -401,7 +401,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
           </section>
           <section class="panel">
             <h2>Editar estrategia</h2>
-            <div class="sub">Se aplica desde el siguiente minuto, recalcula el stop y el objetivo de una posición abierta y reinicia el conteo de la reflexión de este activo.</div>
+            <div class="sub">Se aplica desde el siguiente minuto, recalcula el stop y el objetivo de una posición abierta y reinicia el conteo de la reflexión de este activo. Pruébalo antes con <code>python -m hermes_trading.backtest</code>.</div>
             <div id="editor"></div>
             <div class="result" id="settings-result" role="status"></div>
           </section>
@@ -431,7 +431,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
       </section>
       <section class="panel section">
         <h2>Estrategias actuales</h2>
-        <div class="sub">Entra cuando el RSI cruza el nivel de entrada y sale en el stop, en el objetivo (un múltiplo de la distancia del stop) o con RSI 70/30. Para cambiar una, pulsa Editar.</div>
+        <div class="sub">Entra cuando el RSI de sus velas cruza el nivel de entrada (y, con filtro, solo a favor de la tendencia). Sale en el stop, en el objetivo, con el RSI de salida o por tiempo máximo. Todo el P&amp;L incluye comisiones y slippage simulados. Para cambiar una, pulsa Editar.</div>
         <div class="table-wrap" id="strategies-table"></div>
       </section>
     </section>
@@ -504,11 +504,15 @@ function until(ms) {
   return "en " + (s / 3600).toFixed(1) + " h";
 }
 // The worker reports decisions and reflection results in English (they also go to its logs); translate here.
-const REASONS = { stop_loss: "stop loss", take_profit: "objetivo", rsi_exit: "salida por RSI", manual_close: "venta manual",
-  external_close: "cierre externo", missing_at_broker: "no encontrada en el bróker" };
+const REASONS = { stop_loss: "stop loss", take_profit: "objetivo", rsi_exit: "salida por RSI", time_exit: "tiempo máximo",
+  manual_close: "venta manual", external_close: "cierre externo", missing_at_broker: "no encontrada en el bróker" };
 const reasonEs = (r) => REASONS[r] || String(r).replace(/_/g, " ");
 const DECISIONS = [
   [/^no signal$/, "Sin señal"],
+  [/^no signal \(against the trend\)$/, "Sin señal (RSI en zona de entrada, pero en contra de la tendencia)"],
+  [/^skip: risk limit: (\d+) positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones abiertas (máx. $2)"],
+  [/^skip: risk limit: (\d+) crypto positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones cripto abiertas (máx. $2)"],
+  [/^skip: risk limit: exposure would reach (\d+)% \(max (.+)%\)$/, "Omitido por límite de riesgo: la exposición llegaría a $1% (máx. $2%)"],
   [/^holding (long|short) \(exit blocked by day-trade rule until next session\)$/, "Manteniendo $1 (salida bloqueada por la regla de day trading hasta la próxima sesión)"],
   [/^holding (long|short)$/, "Manteniendo $1"],
   [/^opened (long|short)(.*)$/, "Abierto $1$2"],
@@ -539,14 +543,26 @@ const REFLECT_REPORTS = [
   [/^strategy changed while reflecting — retrying next cycle\.$/, "La estrategia cambió durante la reflexión: se reintenta"],
   [/^(\S+) is already at (.+) or its bound — no change\.$/, "$1 ya está en $2 o en su límite: sin cambios"],
   [/^FAILED — (.*)$/, "Error: $1"],
+  [/^rejected by backtest: (\S+) (\S+) → (\S+) \(out-of-sample score (\S+) → (\S+), whole period (\S+) → (\S+)\)$/,
+    "Rechazado por backtest: $1 $2 → $3 (fuera de muestra $4 → $5, periodo completo $6 → $7)"],
 ];
 function reportEs(text) {
   for (const [re, out] of REFLECT_REPORTS) if (re.test(text)) return text.replace(re, out);
   return text;
 }
-const MODE_LABEL = { hermes: "Hermes", llm: "IA (Gemini)", fallback: "Regla de respaldo", manual: "Manual (dashboard)" };
-const VAR_LABEL = { "entry.threshold": "RSI de entrada", "entry.direction": "Dirección", stop_loss_pct: "Stop loss %",
-  take_profit_r: "Objetivo (× stop)", position_size_r: "Riesgo por operación %" };
+const MODE_LABEL = { hermes: "Hermes", llm: "IA (Gemini)", fallback: "Regla de respaldo", manual: "Manual (dashboard)",
+  revert: "Reversión automática", migration: "Migración (backtest)" };
+const VAR_LABEL = { "entry.threshold": "RSI de entrada", "entry.direction": "Dirección", "entry.timeframe": "Velas de la señal",
+  trend_filter: "Filtro de tendencia", exit_rsi: "RSI de salida", stop_loss_pct: "Stop loss %", stop_atr_mult: "Stop (× ATR)",
+  take_profit_r: "Objetivo (× stop)", position_size_r: "Riesgo por operación %", max_hold_min: "Tiempo máximo (min)" };
+const TF_LABEL = { "1m": "1 min", "5m": "5 min", "15m": "15 min", "1h": "1 h", "4h": "4 h", off: "sin filtro" };
+// Strategy fields with the original behaviour when an older strategy.yaml doesn't have them (strategy.py)
+function stratView(s) {
+  return { direction: s.entry.direction, threshold: s.entry.threshold, timeframe: s.entry.timeframe || "1m",
+    trend: s.trend_filter || "off", exitRsi: s.exit_rsi ?? 70, stopPct: s.stop_loss_pct, atrMult: s.stop_atr_mult ?? 0,
+    tp: s.take_profit_r ?? 2, risk: s.position_size_r, maxHold: s.max_hold_min ?? 0 };
+}
+const stopText = (v) => (v.atrMult > 0 ? `${v.atrMult}× ATR` : `${v.stopPct}%`);
 const varLabel = (v) => VAR_LABEL[v] || v;
 
 function el(tag, attrs = {}, text) {
@@ -608,6 +624,7 @@ function tradeStats(trades) {
     expectancyPct: n ? (trades.reduce((s, t) => s + t.pnl_pct, 0) / n) * 100 : null,
     avgDuration: n ? trades.reduce((s, t) => s + (Date.parse(t.closed_at) - Date.parse(t.opened_at)), 0) / n : null,
     best: byPct[0], worst: byPct[n - 1],
+    fees: trades.reduce((s, t) => s + (t.fees || 0), 0),
   };
 }
 // Buy & hold from the asset's first entry, marked to the live price (long, whatever the strategy's side).
@@ -1086,6 +1103,7 @@ function renderQuality() {
     ["Ganancia / pérdida media", (s) => num(s.payoff)],
     ["Esperanza por operación", (s) => (s.expectancy == null ? "—" : { text: `${signedUsd(s.expectancy)} (${pct(s.expectancyPct, 3)})`, cls: signCls(s.expectancy) })],
     ["Duración media", (s) => durationFmt(s.avgDuration)],
+    ["Comisiones y slippage", (s) => (s.fees ? { text: signedUsd(-s.fees), cls: "down" } : "—")],
     ["Mejor operación", (s) => (s.best ? `${short(s.best.asset)} ${pct(s.best.pnl_pct * 100)}` : "—")],
     ["Peor operación", (s) => (s.worst ? `${short(s.worst.asset)} ${pct(s.worst.pnl_pct * 100)}` : "—")],
   ];
@@ -1366,7 +1384,7 @@ function renderCards() {
     top.append(sw, el("span", { class: "name" }, a.asset), el("span", { class: "ver" }, a.strategy ? "v" + a.strategy.version : ""));
     const last = lastPrice(a);
     const spark = el("span", { class: "spark" });
-    const rsiNow = c ? c.rsi[c.rsi.length - 1] : tick.rsi;
+    const rsiNow = tick.rsi_timeframe && tick.rsi_timeframe !== "1m" ? tick.rsi : c ? c.rsi[c.rsi.length - 1] : tick.rsi;
     const thr = a.strategy ? a.strategy.entry.threshold : null;
     const meter = el("span", { class: "meter", "aria-hidden": "true" });
     if (rsiNow != null) { const fill = el("span", { class: "fill" }); fill.style.width = rsiNow + "%"; fill.style.background = color; meter.append(fill); }
@@ -1413,22 +1431,27 @@ function renderDetail() {
   } else {
     candleChart(document.getElementById("price-chart"), null, { emptyText: "Cargando velas…" });
   }
-  const dirLong = !strat || strat.entry.direction === "long";
-  const rsiRefs = strat ? [
-    { y: strat.entry.threshold, label: `Entrada ${dirLong ? "<" : ">"} ${strat.entry.threshold}`, color: css("--text-secondary"), dashed: true },
-    { y: dirLong ? 70 : 30, label: `Salida ${dirLong ? ">" : "<"} ${dirLong ? 70 : 30}`, color: css("--text-muted"), dashed: true },
+  const sv = strat ? stratView(strat) : null;
+  const dirLong = !sv || sv.direction === "long";
+  const exitLevel = sv ? (dirLong ? sv.exitRsi : 100 - sv.exitRsi) : 70;
+  const rtf = sv ? sv.timeframe : "1m";
+  const cr = rtf === "1m" ? c1 : tfCandles[`${a.asset}|${rtf}`];
+  document.getElementById("rsi-title").textContent = `RSI (14) · velas de ${TF_LABEL[rtf]}`;
+  const rsiRefs = sv ? [
+    { y: sv.threshold, label: `Entrada ${dirLong ? "<" : ">"} ${sv.threshold}`, color: css("--text-secondary"), dashed: true },
+    { y: exitLevel, label: `Salida ${dirLong ? "≥" : "≤"} ${exitLevel}`, color: css("--text-muted"), dashed: true },
   ] : [];
-  document.getElementById("rsi-sub").textContent = strat
-    ? `Abre un ${strat.entry.direction} cuando el RSI ${dirLong ? "baja de" : "sube de"} ${strat.entry.threshold}; sale en ${dirLong ? 70 : 30}, en el stop o en el objetivo`
+  document.getElementById("rsi-sub").textContent = sv
+    ? `Abre un ${sv.direction} cuando el RSI ${dirLong ? "baja de" : "sube de"} ${sv.threshold}${sv.trend !== "off" ? `, solo a favor de la tendencia de ${TF_LABEL[sv.trend]}` : ""}; sale con RSI ${exitLevel}, en el stop, en el objetivo${sv.maxHold > 0 ? " o por tiempo" : ""}`
     : "";
   lineChart(document.getElementById("rsi-chart"), {
-    series: c1 ? [{ name: "RSI", color, points: c1.t.map((t, i) => [t, c1.rsi[i]]).filter((p) => p[1] != null) }] : [{ name: "RSI", color, points: [] }],
+    series: cr ? [{ name: "RSI", color, points: cr.t.map((t, i) => [t, cr.rsi[i]]).filter((p) => p[1] != null) }] : [{ name: "RSI", color, points: [] }],
     height: 170, yDomain: [0, 100], refs: rsiRefs, label: `${a.asset} RSI`, yFmt: (v) => v.toFixed(0),
     tooltipFmt: (v) => v.toFixed(1), emptyText: "Cargando velas en vivo…",
   });
-  table(document.getElementById("trades-table"), ["Apertura", "Cierre", "Lado", "Entrada", "Salida", "Motivo", "P&L"],
+  table(document.getElementById("trades-table"), ["Apertura", "Cierre", "Lado", "Entrada", "Salida", "Motivo", "Comisión", "P&L neto"],
     a.trades.slice().reverse().map((t) => [dateTimeFmt(Date.parse(t.opened_at)), dateTimeFmt(Date.parse(t.closed_at)), t.direction,
-      priceFmt(t.entry_price), priceFmt(t.exit_price), reasonEs(t.exit_reason),
+      priceFmt(t.entry_price), priceFmt(t.exit_price), reasonEs(t.exit_reason), t.fees != null ? usd(t.fees) : "sin simular",
       { text: `${signedUsd(t.pnl)} (${pct(t.pnl_pct * 100, 3)})`, cls: signCls(t.pnl) }]), { empty: "Aún sin operaciones cerradas." });
 
   document.getElementById("strategy-title").textContent = strat ? `Estrategia v${strat.version} · ${a.asset}` : "Estrategia";
@@ -1437,10 +1460,14 @@ function renderDetail() {
   params.replaceChildren();
   if (strat) {
     const st = tradeStats(a.trades), bh = buyHold(a);
+    const v = stratView(strat);
     const rows = [
-      ["Indicador", strat.entry.indicator.toUpperCase()], ["Dirección", strat.entry.direction],
-      ["Umbral de entrada", strat.entry.threshold], ["Stop loss", strat.stop_loss_pct + "%"],
-      ["Riesgo por operación", strat.position_size_r + "% del capital"], ["Objetivo", (strat.take_profit_r ?? 2) + "× distancia del stop"],
+      ["Señal", `RSI(14) en velas de ${TF_LABEL[v.timeframe]}`], ["Dirección", v.direction],
+      ["Entrada", `RSI ${v.direction === "long" ? "<" : ">"} ${v.threshold}${v.trend !== "off" ? ` y a favor de la tendencia de ${TF_LABEL[v.trend]}` : ""}`],
+      ["Salida por RSI", `${v.direction === "long" ? "≥" : "≤"} ${v.direction === "long" ? v.exitRsi : 100 - v.exitRsi}`],
+      ["Stop", stopText(v)], ["Objetivo", v.tp + "× distancia del stop"],
+      ["Tiempo máximo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "sin límite"],
+      ["Riesgo por operación", v.risk + "% del capital"],
       ["Rentabilidad total", pct(assetTotalRet(a), 3)], ["Comprar y mantener", bh ? `${pct(bh.ret, 3)} desde ${dateTimeFmt(Date.parse(bh.since))}` : "—"],
       ["Profit factor", st.profitFactor == null ? "—" : st.profitFactor === Infinity ? "∞" : st.profitFactor.toFixed(2)],
       ["Máx. drawdown", (a.metrics.max_drawdown * 100).toFixed(2) + "%"],
@@ -1455,9 +1482,9 @@ function renderDetail() {
     const left = Math.max(0, state.goal.reflection_every - a.trades.length);
     hist.append(el("li", {}, left ? `Aún sin cambios: primera reflexión tras ${left} operaci${left > 1 ? "ones cerradas" : "ón cerrada"} más.` : "Aún sin cambios: toca en la próxima reflexión."));
   }
-  for (const h of a.hypotheses.slice().reverse()) {
-    const li = el("li");
-    const head = el("div", { class: "what" }, `v${h.from_version} → v${h.to_version} · ${varLabel(h.variable)} ${h.old_value} → ${h.new_value}${h.clamped ? ` (pedido ${h.requested_value}, limitado)` : ""} `);
+  for (const g of changeGroups(a.hypotheses).reverse()) {
+    const h = g.h, li = el("li");
+    const head = el("div", { class: "what" }, `${h.rejected ? "Propuesta" : g.versions} · ${g.text}${h.clamped ? ` (pedido ${h.requested_value}, limitado)` : ""} `);
     head.append(evalChip(h));
     li.append(head, el("div", { class: "muted" }, `${MODE_LABEL[h.mode] || h.mode} · ${dateTimeFmt(Date.parse(h.ts))}${evalNote(h)}`),
       el("div", { class: "why" }, h.rationale || ""));
@@ -1469,9 +1496,16 @@ function renderDetail() {
 // Mirrors reflect.py TUNABLE bounds; the worker validates again.
 const SETTINGS = [
   { key: "entry.threshold", label: "RSI de entrada", min: 5, max: 95, step: 1, hint: "long: compra por debajo · short: vende por encima" },
-  { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1 },
+  { key: "exit_rsi", label: "RSI de salida", min: 55, max: 90, step: 1, fallback: 70, hint: "long sale al subir a este nivel; short, al bajar a 100 menos este valor" },
+  { key: "stop_atr_mult", label: "Stop (× ATR)", min: 0, max: 6, step: 0.25, fallback: 0, hint: "0 = usar el stop loss %; si no, la distancia del stop se adapta a la volatilidad" },
+  { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1, hint: "solo se usa con Stop (× ATR) en 0" },
   { key: "take_profit_r", label: "Objetivo (× stop)", min: 0.5, max: 10, step: 0.1, fallback: 2.0 },
+  { key: "max_hold_min", label: "Tiempo máximo (min)", min: 0, max: 2880, step: 30, fallback: 0, hint: "0 = sin límite" },
   { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05 },
+];
+const SELECTS = [
+  { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m"], fallback: "1m" },
+  { key: "trend_filter", label: "Filtro de tendencia", options: ["off", "1h", "4h"], fallback: "off" },
 ];
 const drafts = {};  // asset -> {key: value} not saved yet; survives the periodic re-render
 const getPath = (o, k) => k.split(".").reduce((x, p) => (x == null ? x : x[p]), o);
@@ -1481,7 +1515,7 @@ function renderEditor(a) {
   host.dataset.asset = a.asset;
   host.replaceChildren();
   if (!a.strategy) { host.append(el("div", { class: "muted" }, "Sin estrategia todavía.")); return; }
-  const saved = { "entry.direction": a.strategy.entry.direction, ...Object.fromEntries(SETTINGS.map((f) => [f.key, getPath(a.strategy, f.key) ?? f.fallback])) };
+  const saved = { "entry.direction": a.strategy.entry.direction, ...Object.fromEntries([...SETTINGS, ...SELECTS].map((f) => [f.key, getPath(a.strategy, f.key) ?? f.fallback])) };
   const draft = drafts[a.asset] || (drafts[a.asset] = {});
   const value = (k) => (k in draft ? draft[k] : saved[k]);
   const form = el("div", { class: "editor" });
@@ -1491,8 +1525,12 @@ function renderEditor(a) {
   const refresh = () => {
     const dirty = Object.keys(draft).filter((k) => String(draft[k]) !== String(saved[k]));
     save.disabled = reset.disabled = !dirty.length;
-    const frac = (Number(value("position_size_r")) / Number(value("stop_loss_pct"))) * 100;
-    derived.textContent = isFinite(frac) ? `Tamaño de posición resultante: ${Math.min(100, frac).toFixed(0)}% de la cuenta (riesgo ÷ stop, sin apalancamiento)` : "";
+    if (Number(value("stop_atr_mult")) > 0) {
+      derived.textContent = "El tamaño de la posición depende de la volatilidad al entrar: se pierde el riesgo por operación si toca el stop (sin apalancamiento).";
+    } else {
+      const frac = (Number(value("position_size_r")) / Number(value("stop_loss_pct"))) * 100;
+      derived.textContent = isFinite(frac) ? `Tamaño de posición resultante: ${Math.min(100, frac).toFixed(0)}% de la cuenta (riesgo ÷ stop, sin apalancamiento)` : "";
+    }
   };
   const bind = (input, k) => {
     input.addEventListener("input", () => { draft[k] = input.value; input.classList.toggle("dirty", String(input.value) !== String(saved[k])); refresh(); });
@@ -1503,6 +1541,12 @@ function renderEditor(a) {
   if (a.kind === "stock") { dir.disabled = true; dir.title = "Las acciones y los ETFs solo operan en long"; }
   bind(dir, "entry.direction");
   form.append(el("label", { for: "ed-dir" }, "Dirección"), dir);
+  for (const f of SELECTS) {
+    const id = "ed-" + f.key.replace(".", "-"), sel = el("select", { id });
+    for (const o of f.options) { const opt = el("option", { value: o }, TF_LABEL[o]); if (value(f.key) === o) opt.selected = true; sel.append(opt); }
+    bind(sel, f.key);
+    form.append(el("label", { for: id }, f.label), sel);
+  }
   for (const f of SETTINGS) {
     const id = "ed-" + f.key.replace(".", "-");
     const input = el("input", { id, type: "number", min: f.min, max: f.max, step: f.step, value: value(f.key) });
@@ -1523,7 +1567,7 @@ async function saveSettings(asset, saved, btn) {
   const changes = {};
   for (const [k, v] of Object.entries(draft)) {
     if (String(v) === String(saved[k])) continue;
-    if (k !== "entry.direction") {
+    if (k !== "entry.direction" && !SELECTS.some((x) => x.key === k)) {
       const f = SETTINGS.find((x) => x.key === k), n = Number(v);
       if (v === "" || !isFinite(n) || n < f.min || n > f.max) { showResult("settings-result", `${f.label} debe estar entre ${f.min} y ${f.max}.`, true); return; }
       changes[k] = n;
@@ -1550,23 +1594,45 @@ async function saveSettings(asset, saved, btn) {
 // ================= Estrategia e IA =================
 function evalChip(h) {
   const ev = h.evaluation || {};
+  if (h.rejected || ev.status === "rejected") return el("span", { class: "chip bad" }, "rechazado por backtest");
   if (ev.status === "done") return el("span", { class: "chip " + (ev.improved ? "good" : "bad") }, ev.improved ? "mejoró" : "empeoró");
   if (ev.status === "pending") return el("span", { class: "chip pending" }, `midiendo ${ev.n_after}/${ev.needed}`);
   return el("span", { class: "chip pending" }, "sin datos suficientes");
 }
 function evalNote(h) {
   const ev = h.evaluation || {};
-  if (ev.status !== "done") return "";
+  const bt = h.backtest;
+  const btText = bt && bt.baseline && bt.candidate
+    ? ` · backtest fuera de muestra ${bt.baseline.oos_score.toFixed(2)} → ${bt.candidate.oos_score.toFixed(2)}, periodo completo ${bt.baseline.all_score.toFixed(2)} → ${bt.candidate.all_score.toFixed(2)}`
+    : bt && bt.verdict === "unavailable" ? " · sin backtest (sin historia)" : "";
+  if (ev.status !== "done") return btText;
   const pred = ev.matched == null ? "" : ev.matched ? " · predicción acertada" : " · predicción fallida";
-  return ` · puntuación ${ev.score_before.toFixed(2)} → ${ev.score_after.toFixed(2)} · media por operación ${pct(ev.avg_before * 100, 3)} → ${pct(ev.avg_after * 100, 3)}${pred}`;
+  return ` · puntuación ${ev.score_before.toFixed(2)} → ${ev.score_after.toFixed(2)} · media por operación ${pct(ev.avg_before * 100, 3)} → ${pct(ev.avg_after * 100, 3)}${pred}${btText}`;
+}
+// Changes saved together (a manual edit or a migration touching several variables) share a
+// timestamp; show them as one entry.
+function changeGroups(hypotheses) {
+  const out = [];
+  for (const h of hypotheses) {
+    const last = out[out.length - 1];
+    if (last && !h.rejected && !last.h.rejected && last.h.ts === h.ts && last.h.mode === h.mode) last.items.push(h);
+    else out.push({ h, items: [h] });
+  }
+  for (const g of out) {
+    g.text = g.items.map((x) => `${varLabel(x.variable)} ${x.old_value} → ${x.new_value}`).join(" · ");
+    g.versions = `v${g.h.from_version} → v${g.items[g.items.length - 1].to_version}`;
+  }
+  return out;
 }
 function allChanges() {
-  return state.assets.flatMap((a) => a.hypotheses.map((h) => ({ a, h }))).sort((x, y) => Date.parse(y.h.ts) - Date.parse(x.h.ts));
+  return state.assets.flatMap((a) => changeGroups(a.hypotheses).map((g) => ({ a, h: g.h, g })))
+    .sort((x, y) => Date.parse(y.h.ts) - Date.parse(x.h.ts));
 }
 function evalSummary() {
-  const s = { done: 0, improved: 0, pending: 0, predicted: 0, matched: 0 };
+  const s = { done: 0, improved: 0, pending: 0, predicted: 0, matched: 0, rejected: 0 };
   for (const { h } of allChanges()) {
-    if (h.mode === "manual") continue;
+    if (h.mode === "manual" || h.mode === "migration") continue;
+    if (h.rejected) { s.rejected++; continue; }
     const ev = h.evaluation || {};
     if (ev.status === "done") { s.done++; if (ev.improved) s.improved++; if (ev.matched != null) { s.predicted++; if (ev.matched) s.matched++; } }
     else if (ev.status === "pending") s.pending++;
@@ -1582,41 +1648,44 @@ function renderEstrategia() {
     table(document.getElementById("reflect-table"), [], []);
   } else {
     const next = r.ts ? Date.parse(r.ts) + (r.every_s || 1800) * 1000 : null;
-    sub.textContent = `Cada ${Math.round((r.every_s || 1800) / 60)} minutos el worker revisa cada activo; si juntó ${state.goal.reflection_every} operaciones cerradas nuevas, ${MODE_LABEL[r.mode] || r.mode} propone cambiar una sola variable.`;
+    sub.textContent = `Cada ${Math.round((r.every_s || 1800) / 60)} minutos el worker revisa cada activo; si juntó ${state.goal.reflection_every} operaciones cerradas nuevas, revierte el último cambio si empeoró o ${MODE_LABEL[r.mode] || r.mode} propone cambiar una sola variable, que se valida con backtest.`;
     const reports = Object.entries(r.reports || {});
     const changed = reports.filter(([, t]) => /^v\d+ → v\d+/.test(t)).length, failed = reports.filter(([, t]) => t.startsWith("FAILED")).length;
+    const rejectedNow = reports.filter(([, t]) => t.startsWith("rejected by backtest")).length;
     kp.append(kpi("Modo", MODE_LABEL[r.mode] || r.mode), kpi("Último ciclo", r.ts ? timeFmt(Date.parse(r.ts)) : "—", "", ago(r.ts)),
       kpi("Próximo ciclo", next ? timeFmt(next) : "—", "", next ? until(next) : ""),
-      kpi("Cambios en el último ciclo", String(changed)), kpi("Errores", String(failed + (r.error ? 1 : 0)), failed || r.error ? "down" : ""));
+      kpi("Cambios en el último ciclo", String(changed)), kpi("Rechazados", String(rejectedNow)), kpi("Errores", String(failed + (r.error ? 1 : 0)), failed || r.error ? "down" : ""));
     if (r.error) { const box = el("div", { class: "warnbox" }); box.textContent = "El ciclo falló: " + r.error; err.append(box); }
     table(document.getElementById("reflect-table"), ["Activo", "Resultado del último ciclo"], reports.map(([asset, text]) =>
       [asset, { text: reportEs(text), cls: "wrap" + (text.startsWith("FAILED") ? " down" : /^v\d+/.test(text) ? " up" : "") }]));
   }
   const ev = evalSummary();
-  document.getElementById("eval-sub").textContent = `Cada cambio se mide comparando la puntuación de las ${state.goal.reflection_every} operaciones anteriores con las ${state.goal.reflection_every} siguientes bajo la nueva versión. Con tan pocas operaciones es una pista, no una prueba.`;
+  document.getElementById("eval-sub").textContent = `Antes de aplicarse, cada propuesta de la IA se prueba con un backtest de 30 días: solo se aplica si no empeora fuera de muestra. Después se mide en vivo comparando la puntuación de las ${state.goal.reflection_every} operaciones anteriores con las ${state.goal.reflection_every} siguientes; si empeora claramente, se revierte sola.`;
   document.getElementById("eval-kpis").replaceChildren(
     kpi("Mejoraron", `${ev.improved} de ${ev.done}`, ev.done ? (ev.improved * 2 >= ev.done ? "up" : "down") : "", "cambios automáticos ya medidos"),
     kpi("Predicción acertada", ev.predicted ? `${ev.matched} de ${ev.predicted}` : "—", "", "la IA dijo si la puntuación subiría o bajaría"),
     kpi("Midiendo", String(ev.pending), "", "esperando operaciones con la nueva versión"),
+    kpi("Rechazados por backtest", String(ev.rejected), "", "propuestas que no mejoraban fuera de muestra"),
   );
   table(document.getElementById("eval-table"), ["Fecha", "Activo", "Origen", "Cambio", "Resultado", "Puntuación", "Media por operación"],
-    allChanges().map(({ a, h }) => {
+    allChanges().map(({ a, h, g }) => {
       const e = h.evaluation || {};
-      return { cells: [dateTimeFmt(Date.parse(h.ts)), a.asset, MODE_LABEL[h.mode] || h.mode, `${varLabel(h.variable)} ${h.old_value} → ${h.new_value}`,
+      return { cells: [dateTimeFmt(Date.parse(h.ts)), a.asset, MODE_LABEL[h.mode] || h.mode, { text: g.text, cls: "wrap" },
         { node: evalChip(h) },
         e.status === "done" ? `${e.score_before.toFixed(2)} → ${e.score_after.toFixed(2)}` : "—",
         e.status === "done" ? `${pct(e.avg_before * 100, 3)} → ${pct(e.avg_after * 100, 3)}` : "—"],
         onClick: () => { selected = a.asset; setTab("activos"); } };
     }), { empty: "Aún no hay cambios de estrategia." });
-  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Dirección", "RSI entrada", "Stop %", "Objetivo ×", "Riesgo %", "Tamaño", "Pendientes", ""],
+  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Dirección", "Velas", "Tendencia", "RSI entrada", "RSI salida", "Stop", "Objetivo ×", "Tiempo máx.", "Riesgo %", "Pendientes", ""],
     state.assets.filter((a) => a.strategy).map((a) => {
-      const s = a.strategy, frac = Math.min(100, (s.position_size_r / s.stop_loss_pct) * 100);
+      const v = stratView(a.strategy);
       const lastH = a.hypotheses[a.hypotheses.length - 1];
       const pending = lastH ? a.trades.filter((t) => t.closed_at > lastH.ts).length : a.trades.length;
       const b = el("button", { type: "button", class: "small" }, "Editar");
       b.addEventListener("click", () => { selected = a.asset; setTab("activos"); setTimeout(() => document.getElementById("editor").scrollIntoView({ behavior: "smooth", block: "center" }), 50); });
-      return [a.asset, "v" + s.version, s.entry.direction, String(s.entry.threshold), String(s.stop_loss_pct), String(s.take_profit_r ?? 2),
-        String(s.position_size_r), `${frac.toFixed(0)}%`, `${Math.min(pending, state.goal.reflection_every)}/${state.goal.reflection_every}`, { node: b, cls: "act" }];
+      return [a.asset, "v" + a.strategy.version, v.direction, TF_LABEL[v.timeframe], TF_LABEL[v.trend], String(v.threshold), String(v.exitRsi),
+        stopText(v), String(v.tp), v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", String(v.risk),
+        `${Math.min(pending, state.goal.reflection_every)}/${state.goal.reflection_every}`, { node: b, cls: "act" }];
     }));
 }
 
@@ -1631,8 +1700,10 @@ function feedItems() {
     }
     const p = a.paper.position;
     if (p) items.push({ ts: p.opened_at, cat: "trade", cls: "", asset: a.asset, what: `Abre ${p.direction} a ${priceFmt(p.entry_price)}${p.manual ? " (manual)" : ""}`, why: "posición abierta ahora" });
-    for (const h of a.hypotheses)
-      items.push({ ts: h.ts, cat: "strategy", cls: "strategy", asset: a.asset, what: `${MODE_LABEL[h.mode] || h.mode}: ${varLabel(h.variable)} ${h.old_value} → ${h.new_value} (v${h.from_version} → v${h.to_version})`, why: h.rationale || "", h });
+    for (const { h, text, versions } of changeGroups(a.hypotheses))
+      items.push({ ts: h.ts, cat: "strategy", cls: h.rejected ? "" : "strategy", asset: a.asset,
+        what: h.rejected ? `${MODE_LABEL[h.mode] || h.mode} propuso ${text}` : `${MODE_LABEL[h.mode] || h.mode}: ${text} (${versions})`,
+        why: (h.rationale || "") + evalNote(h), h });
   }
   for (const e of state.events || []) {
     const text = e.kind === "issue" ? decisionEs(e.text) : e.kind === "recovered" ? "Vuelve a la normalidad"
@@ -1775,9 +1846,14 @@ async function loadCandles() {
   render();
 }
 async function loadTf() {
-  if (!state || tab !== "activos" || ui.tf === "1m" || !selected) return;
-  const asset = selected, tf = ui.tf;
-  try { const c = await fetchCandles(asset, tf); if (c) { tfCandles[`${asset}|${tf}`] = c; if (selected === asset && ui.tf === tf) render(); } } catch (_) { /* keep previous */ }
+  if (!state || tab !== "activos" || !selected) return;
+  const asset = selected, a = state.assets.find((x) => x.asset === asset);
+  // the price chart's timeframe, and the one the strategy's RSI runs on
+  const tfs = new Set([ui.tf, a && a.strategy ? stratView(a.strategy).timeframe : "1m"]);
+  tfs.delete("1m");
+  for (const tf of tfs) {
+    try { const c = await fetchCandles(asset, tf); if (c) { tfCandles[`${asset}|${tf}`] = c; if (selected === asset) render(); } } catch (_) { /* keep previous */ }
+  }
 }
 let syncPoll = null;
 async function watchSync() {

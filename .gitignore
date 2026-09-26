@@ -16,3 +16,4 @@ remote_state/
 remote_state.incoming/
 dashboard_state/
 dashboard_state.incoming/
+cache/

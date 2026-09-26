@@ -100,6 +100,27 @@ class Alpaca:
         rows = [(int(_parse_ts(b["t"]).timestamp() * 1000), float(b["c"])) for b in data.get("bars") or []]
         return rows[::-1]
 
+    _TF = {"1m": ("1Min", 5), "5m": ("5Min", 10), "15m": ("15Min", 20), "1h": ("1Hour", 60), "4h": ("4Hour", 200), "1d": ("1Day", 400)}
+
+    async def ohlcv(self, symbol: str, tf: str, limit: int) -> dict:
+        """Most recent bars as {t, open, high, low, close}, oldest first; cached a fraction of a bar."""
+        from ..strategy import TF_SECONDS
+
+        key = (symbol, tf)
+        cache = self.__dict__.setdefault("_ohlcv_cache", {})
+        hit = cache.get(key)
+        if hit and time.monotonic() - hit[0] < min(TF_SECONDS[tf] / 5, 300):
+            return hit[1]
+        timeframe, days = self._TF[tf]
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+        data = await self._req("GET", f"{DATA_URL}/v2/stocks/{symbol}/bars",
+                               params={"timeframe": timeframe, "limit": limit, "feed": self.feed, "sort": "desc", "start": start})
+        bars = (data.get("bars") or [])[::-1]
+        candles = {"t": [int(_parse_ts(b["t"]).timestamp() * 1000) for b in bars], "open": [float(b["o"]) for b in bars],
+                   "high": [float(b["h"]) for b in bars], "low": [float(b["l"]) for b in bars], "close": [float(b["c"]) for b in bars]}
+        cache[key] = (time.monotonic(), candles)
+        return candles
+
     # --- trading -----------------------------------------------------------------
 
     async def account(self) -> dict:

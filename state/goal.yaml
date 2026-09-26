@@ -24,5 +24,25 @@ target_return_30d: 0.05      # success
 max_drawdown:      0.08      # failure
 min_sharpe:        1.2       # quality bar
 failure_below:     -0.04     # score floor — steeply negative below this
-reflection_every:  5         # cycle cadence (per asset)
+reflection_every:  10        # cycle cadence (per asset): closed trades between reflections
 one_variable_only: true      # scientific-method guardrail
+costs:                       # % per side on simulated fills (stocks fill at Alpaca: real prices, no commission)
+  crypto: {fee_pct: 0.1, slippage_pct: 0.02}
+risk:                        # portfolio limits checked before every automatic entry
+  max_open_positions: 6
+  max_open_crypto: 4         # crypto pairs move together: more open at once is close to one big bet
+  max_exposure_pct: 60       # invested value / total capital
+strategy_defaults:           # applied once at boot to strategies that predate them (recorded as "migration")
+  exit_rsi: 75               # the first key marks a strategy as migrated
+  entry.timeframe: "15m"
+  entry.threshold: 25
+  trend_filter: "off"
+  stop_atr_mult: 3.0
+  take_profit_r: 3.0
+  max_hold_min: 0
+strategy_defaults_note: >-
+  Backtest de 60 días en los 12 pares cripto con comisiones reales (0,1% + 0,02% por lado). La estrategia
+  anterior (RSI de 1 min, salida en 70, stop 2%) perdió -9,6% de media por par en los primeros 42 días y
+  -4,6% en los 18 siguientes. Esta configuración fue la mejor de 288 combinaciones en los primeros 42 días
+  (+0,6%) y quedó en -0,05% en los 18 días que no se usaron para elegirla: casi sin pérdidas, pero sin
+  ventaja demostrada. En los ETFs pasó de +0,3% a +8,1% en total (pocas operaciones).

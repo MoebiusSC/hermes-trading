@@ -11,3 +11,4 @@ state/assets/
 dashboard_state/
 remote_state.incoming/
 dashboard_state.incoming/
+cache/

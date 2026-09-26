@@ -7,10 +7,10 @@ import json
 import shutil
 import sys
 
-from . import config, state_server
+from . import config, reflect, state_server
 from .adapters import SchemaError
 from .loop import Worker
-from .storage import load_yaml
+from .storage import dump_yaml, load_yaml
 
 
 def _run(coro) -> None:
@@ -66,6 +66,34 @@ def migrate_legacy_layout(default_asset: str) -> None:
     print(f"Migrated single-asset state into {dest.root}")
 
 
+def migrate_strategies(goal: dict, assets: list[str]) -> None:
+    """Apply goal.yaml `strategy_defaults` to every strategy that predates them, once, as a
+    recorded change (mode "migration"): the new fields plus any listed value the reflection
+    hasn't already moved. The template for new assets gets them too."""
+    defaults = goal.get("strategy_defaults") or {}
+    if not defaults:
+        return
+    marker = next(iter(defaults))  # a strategy that has the first default key was already migrated
+    note = str(goal.get("strategy_defaults_note") or "Nuevos valores por defecto elegidos por backtest.")
+    for asset in assets:
+        paths = config.asset_paths(asset)
+        if not paths.strategy.exists():
+            continue
+        strategy = load_yaml(paths.strategy)
+        try:
+            reflect.get_path(strategy, marker)
+            continue
+        except KeyError:
+            pass
+        changes = {k: v for k, v in defaults.items() if not (config.is_stock(asset) and k == "entry.direction")}
+        records = reflect.apply_manual(paths, changes, config.is_stock(asset), mode="migration", rationale=note)
+        print(f"Migrated {asset}: " + ", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records), flush=True)
+    template = load_yaml(config.STRATEGY_TEMPLATE)
+    for key, value in defaults.items():
+        reflect._set_path_creating(template, key, value)
+    dump_yaml(config.STRATEGY_TEMPLATE, template)
+
+
 def main(argv: list[str] | None = None) -> None:
     config.load_env()
     parser = argparse.ArgumentParser(description="hermes-trading paper worker")
@@ -84,6 +112,7 @@ def main(argv: list[str] | None = None) -> None:
     goal = load_yaml(config.GOAL_FILE)
     assets = [args.asset] if args.asset else config.goal_assets(goal)
     migrate_legacy_layout(assets[0])
+    migrate_strategies(goal, config.goal_assets(goal))
     state_server.start()
     try:
         worker = Worker(assets, goal)

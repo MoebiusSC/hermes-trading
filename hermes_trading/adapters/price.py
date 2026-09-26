@@ -65,3 +65,40 @@ async def fetch(asset: str) -> dict:
             "last": float(candles[-1][4]),
         }
     raise RuntimeError("no exchange returned prices — " + "; ".join(errors))
+
+
+_ohlcv_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+async def ohlcv(asset: str, tf: str, limit: int) -> dict:
+    """OHLCV candles {t, open, high, low, close} (t = bar start ms), from the exchange that last
+    served this asset. Cached for a fraction of the bar length: indicators only use closed bars."""
+    import time
+
+    from ..strategy import TF_SECONDS
+
+    key = (asset, tf)
+    hit = _ohlcv_cache.get(key)
+    if hit and time.monotonic() - hit[0] < min(TF_SECONDS[tf] / 5, 300):
+        return hit[1]
+    primary = env("EXCHANGE_ID", "binance")
+    order = [primary] + [e for e in FALLBACK_EXCHANGES if e != primary]
+    preferred = _preferred.get(asset)
+    if preferred in order:
+        order.remove(preferred)
+        order.insert(0, preferred)
+    errors = []
+    for exchange_id in order:
+        try:
+            rows = await _client(exchange_id, exchange_id == primary).fetch_ohlcv(asset, timeframe=tf, limit=limit)
+        except Exception as e:
+            errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
+            continue
+        if not rows:
+            errors.append(f"{exchange_id}: no {tf} candles")
+            continue
+        candles = {"t": [int(r[0]) for r in rows], "open": [float(r[1]) for r in rows], "high": [float(r[2]) for r in rows],
+                   "low": [float(r[3]) for r in rows], "close": [float(r[4]) for r in rows]}
+        _ohlcv_cache[key] = (time.monotonic(), candles)
+        return candles
+    raise RuntimeError(f"no exchange returned {tf} candles — " + "; ".join(errors))
