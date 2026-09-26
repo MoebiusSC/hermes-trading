@@ -51,7 +51,7 @@ TUNABLE = {
     "max_hold_min": (0.0, 2880.0),
 }
 # Values for fields an older strategy.yaml doesn't have (the original behaviour; see strategy.py)
-TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0}
+TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0, "position_pct": 0.0}
 # Largest move allowed per cycle, so one reflection nudges a variable instead of replacing it.
 MAX_STEP = {
     "entry.threshold": 5.0,
@@ -63,6 +63,8 @@ MAX_STEP = {
     "max_hold_min": 120.0,
 }
 # Settings only changed by hand (dashboard) or by a migration, never by a reflection
+# Numbers only changed by hand: how much of the account a position uses is the owner's call, not the AI's
+MANUAL_NUMBERS = {"position_pct": (0.0, 100.0)}
 CHOICES = {"entry.direction": ("long", "short"), "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
 AUTO_MODES = ("hermes", "llm", "fallback", "revert")  # changes the reflection made (not manual/migration)
 REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
@@ -151,7 +153,8 @@ How the strategy trades (strategy.yaml fields):
 - exits: stop, target (take_profit_r x stop distance), RSI reaching exit_rsi (short: 100 - exit_rsi), or after
   max_hold_min minutes (0 = no limit). Stop distance = stop_atr_mult x ATR(14) when stop_atr_mult > 0,
   otherwise stop_loss_pct % of the price.
-- size: position_size_r % of the account is lost if the stop is hit.
+- size: position_size_r % of the account is lost if the stop is hit, unless position_pct > 0 (set by the owner, not
+  tunable): then every position uses position_pct % of the account and position_size_r has no effect.
 - costs per side: fee {fee * 100:.3f}%, slippage {slip * 100:.3f}% (already included in all P&L below).
 
 Walk-forward backtest of the CURRENT strategy on recent history (in sample = first 70%, out of sample = last 30%):
@@ -313,8 +316,8 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool, mode: str
                 raise ValueError(f"{variable} debe ser uno de: {', '.join(CHOICES[variable])}")
             if variable == "entry.direction" and stock and new != "long":
                 raise ValueError("las acciones y los ETFs solo operan en long")
-        elif variable in TUNABLE:
-            lo, hi = TUNABLE[variable]
+        elif variable in TUNABLE or variable in MANUAL_NUMBERS:
+            lo, hi = TUNABLE.get(variable) or MANUAL_NUMBERS[variable]
             try:
                 new = round(float(requested), 4)
             except (TypeError, ValueError):
@@ -322,7 +325,7 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool, mode: str
             if not lo <= new <= hi:
                 raise ValueError(f"{variable} debe estar entre {lo:g} y {hi:g}")
         else:
-            raise ValueError(f"{variable!r} no se puede cambiar; permitidos: {', '.join(sorted(CHOICES) + sorted(TUNABLE))}")
+            raise ValueError(f"{variable!r} no se puede cambiar; permitidos: {', '.join(sorted(CHOICES) + sorted(TUNABLE) + sorted(MANUAL_NUMBERS))}")
         try:
             old = get_path(strategy, variable)
         except KeyError:

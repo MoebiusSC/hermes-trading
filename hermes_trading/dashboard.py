@@ -47,7 +47,7 @@ TIMEFRAMES = {
 }
 EQUITY_POINTS = 1500  # the equity curve is downsampled to about this many snapshots
 EVENTS_SHOWN = 300
-FALLBACK_EXCHANGES = ("binance", "kraken", "okx")
+FALLBACK_EXCHANGES = ("binance", "okx", "kraken")  # same order as adapters/price.py
 
 
 # --- Railway sync --------------------------------------------------------------
@@ -329,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             SYNC.start()
             return self._json(SYNC.status())
-        if path in ("/api/sell", "/api/add", "/api/strategy"):
+        if path in ("/api/sell", "/api/add", "/api/strategy", "/api/bulk"):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 body = json.loads(self.rfile.read(length) or b"{}")
@@ -337,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "JSON no válido"}, 400)
             if path == "/api/sell":
                 code, payload = worker_action("/sell", {"asset": str(body.get("asset") or "")})
+            elif path == "/api/bulk":
+                code, payload = worker_action("/bulk", {"changes": body.get("changes"), "kind": str(body.get("kind") or "all")})
             elif path == "/api/strategy":
                 code, payload = worker_action("/strategy", {"asset": str(body.get("asset") or ""), "changes": body.get("changes")})
             else:

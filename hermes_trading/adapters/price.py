@@ -10,8 +10,15 @@ import ccxt.async_support as ccxt_async
 from ..config import env
 from . import SCHEMA_VERSION
 
-FALLBACK_EXCHANGES = ("binance", "kraken", "okx")
+# OKX before Kraken: some Kraken USDT pairs barely trade (79% of BNB/USDT's 15m candles were flat),
+# which shrinks ATR and distorts RSI.
+FALLBACK_EXCHANGES = ("binance", "okx", "kraken")
 MIN_CANDLES = 20
+MAX_FLAT_SHARE = 0.5  # candles with high == low; above this the market is too thin to trade on
+
+
+def _thin(rows: list) -> bool:
+    return bool(rows) and sum(1 for r in rows if r[2] == r[3]) / len(rows) > MAX_FLAT_SHARE
 
 _clients: dict[str, object] = {}
 _preferred: dict[str, str] = {}  # asset -> exchange id that last worked
@@ -50,6 +57,9 @@ async def fetch(asset: str) -> dict:
             candles = await client.fetch_ohlcv(asset, timeframe="1m", limit=100)
         except Exception as e:  # geo-blocks, symbol not listed, network
             errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
+            continue
+        if _thin(candles):
+            errors.append(f"{exchange_id}: too many flat candles (illiquid)")
             continue
         if len(candles) < MIN_CANDLES:
             errors.append(f"{exchange_id}: only {len(candles)} candles")
@@ -96,6 +106,9 @@ async def ohlcv(asset: str, tf: str, limit: int) -> dict:
             continue
         if not rows:
             errors.append(f"{exchange_id}: no {tf} candles")
+            continue
+        if _thin(rows):
+            errors.append(f"{exchange_id}: too many flat {tf} candles (illiquid)")
             continue
         candles = {"t": [int(r[0]) for r in rows], "open": [float(r[1]) for r in rows], "high": [float(r[2]) for r in rows],
                    "low": [float(r[3]) for r in rows], "close": [float(r[4]) for r in rows]}

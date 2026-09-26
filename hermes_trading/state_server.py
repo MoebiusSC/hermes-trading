@@ -6,6 +6,7 @@
   POST /sell    {"asset": "BTC/USDT"}                  close that asset's position now
   POST /add     {"asset": "ADA/USDT", "buy": true}     start trading an asset (optionally buy now)
   POST /strategy {"asset": "BTC/USDT", "changes": {"stop_loss_pct": 1.5}}   edit its strategy
+  POST /bulk    {"kind": "crypto", "changes": {"position_pct": 50}}   same edit on every asset of a kind
                 Both reply {"message": "..."} or {"error": "..."}; same bearer token.
 
 /state lists every state file, sending only what the caller is missing:
@@ -19,7 +20,7 @@ With HERMES_DASHBOARD_PASSWORD set it also serves the dashboard (dashboard.html)
   GET /             the dashboard, or a login form without a session
   POST /login       form field `password` → a signed session cookie (7 days)
   POST /logout      drops the session
-  GET /api/state, GET /api/candles, POST /api/{sell,add,strategy,sync}   same API as the local
+  GET /api/state, GET /api/candles, POST /api/{sell,add,strategy,bulk,sync}   same API as the local
                     dashboard, on the worker's live state; they need the session cookie, and the
                     POSTs a same-origin Origin header
 Changing the password logs every session out. Repeated wrong passwords from one IP are refused.
@@ -60,6 +61,8 @@ def _run_action(path: str, body: dict) -> str:
     asset = str(body.get("asset") or "")
     if path == "/sell":
         coro = worker.book(asset).manual_sell()
+    elif path == "/bulk":
+        coro = worker.set_strategy_all(body.get("changes"), str(body.get("kind") or "all"))
     elif path == "/strategy":
         changes = body.get("changes")
         if not isinstance(changes, dict) or not changes:
@@ -266,9 +269,9 @@ def _handler(token: str, password: str = ""):
                 self._send(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if password and self.path in ("/login", "/logout", "/api/sync", "/api/sell", "/api/add", "/api/strategy"):
+            if password and self.path in ("/login", "/logout", "/api/sync", "/api/sell", "/api/add", "/api/strategy", "/api/bulk"):
                 return self._dashboard_post(self.path)
-            if self.path not in ("/state", "/sell", "/add", "/strategy"):
+            if self.path not in ("/state", "/sell", "/add", "/strategy", "/bulk"):
                 return self._send(404, {"error": "not found"})
             sent = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
             if not hmac.compare_digest(sent.encode(), token.encode()):

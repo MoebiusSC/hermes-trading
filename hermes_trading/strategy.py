@@ -14,6 +14,8 @@ behaviour, so an old file trades as it always did):
   stop_atr_mult        stop distance in ATR(14) multiples; 0 = use stop_loss_pct         (since v2, default 0)
   take_profit_r        target distance in multiples of the stop distance                (default 2)
   position_size_r      % of the account lost if the stop is hit
+  position_pct         fixed exposure: % of the account each position uses; 0 = size by
+                       position_size_r and the stop distance                            (since v3, default 0)
   max_hold_min         close a position after this many minutes; 0 = no limit          (since v2, default 0)
 
 Indicators use closed candles only: the forming candle is dropped, so live and backtest agree.
@@ -43,6 +45,7 @@ PARAM_BOUNDS = {
     "take_profit_r": (0.5, 10.0),
     "position_size_r": (0.1, 2.0),
     "max_hold_min": (0.0, 2880.0),
+    "position_pct": (0.0, 100.0),
 }
 
 # Cost model for simulated fills: % per side. Stocks fill at Alpaca (commission-free, real spread).
@@ -67,6 +70,7 @@ def params(strategy: dict) -> dict:
         "take_profit_r": float(strategy.get("take_profit_r", 2.0)),
         "position_size_r": float(strategy["position_size_r"]),
         "max_hold_min": float(strategy.get("max_hold_min", 0) or 0),
+        "position_pct": float(strategy.get("position_pct", 0) or 0),
     }
     if p["timeframe"] not in ENTRY_TIMEFRAMES:
         raise ValueError(f"unsupported entry timeframe {p['timeframe']!r} ({', '.join(ENTRY_TIMEFRAMES)})")
@@ -176,13 +180,16 @@ def levels(p: dict, direction: str, fill: float, dist: float) -> tuple[float, fl
 
 
 def size(p: dict, equity: float, price: float, dist: float) -> float:
-    """Units such that hitting the stop loses position_size_r % of equity; never leveraged."""
+    """Units for a new position, never leveraged: position_pct % of equity when set, otherwise
+    such that hitting the stop loses position_size_r % of equity."""
     if equity <= 0:
         return 0.0
     if price <= 0:
         raise ValueError(f"price must be positive, got {price:g}")
     if dist <= 0:
         raise ValueError(f"stop distance must be positive, got {dist:g}")
+    if p.get("position_pct", 0) > 0:
+        return equity * p["position_pct"] / 100 / price
     return min((equity * p["position_size_r"] / 100) / dist, equity / price)
 
 

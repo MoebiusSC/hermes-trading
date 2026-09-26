@@ -104,6 +104,10 @@ form.add select, form.add input[type=text] {
   border-radius: 8px; padding: 6px 10px; min-width: 0;
 }
 form.add input[type=text] { flex: 1; text-transform: uppercase; }
+form.add input[type=number] {
+  font: inherit; color: var(--text-primary); background: var(--page); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; width: 150px; font-variant-numeric: tabular-nums;
+}
 form.add input[type=text]::placeholder { text-transform: none; }
 form.add label.check { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 13px; }
 .result { font-size: 13px; color: var(--text-secondary); min-height: 1.4em; }
@@ -351,6 +355,24 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
           </form>
         </section>
       </div>
+      <section class="panel section">
+        <h2>Exposición por posición</h2>
+        <div class="sub">Qué parte de la cuenta simulada de cada activo usa cada posición nueva. Por defecto el tamaño sale del riesgo por operación y la distancia del stop; aquí puedes fijarlo en un porcentaje. Nunca pasa del 100% (sin apalancamiento) y las posiciones ya abiertas no cambian.</div>
+        <div class="kpis" id="sizing-kpis"></div>
+        <form class="add" id="sizing-form">
+          <div class="row">
+            <select id="sizing-kind" aria-label="A qué activos se aplica">
+              <option value="crypto">Criptos</option>
+              <option value="stock">ETFs</option>
+              <option value="all">Todos los activos</option>
+            </select>
+            <input type="number" id="sizing-pct" min="0" max="100" step="5" placeholder="% de la cuenta" aria-label="Exposición por posición, % de la cuenta" required>
+            <button type="submit" id="sizing-btn">Aplicar</button>
+          </div>
+          <div class="sub" id="sizing-preview">Escribe un porcentaje para ver el efecto. 0 vuelve al tamaño según el riesgo.</div>
+          <div class="result" id="sizing-result" role="status"></div>
+        </form>
+      </section>
     </section>
 
     <!-- ================= Activos ================= -->
@@ -556,14 +578,14 @@ function reportEs(text) {
 const MODE_LABEL = { hermes: "Hermes", llm: "IA (Gemini)", fallback: "Regla de respaldo", manual: "Manual (dashboard)",
   revert: "Reversión automática", migration: "Migración (backtest)" };
 const VAR_LABEL = { "entry.threshold": "RSI de entrada", "entry.direction": "Dirección", "entry.timeframe": "Velas de la señal",
-  trend_filter: "Filtro de tendencia", exit_rsi: "RSI de salida", stop_loss_pct: "Stop loss %", stop_atr_mult: "Stop (× ATR)",
+  trend_filter: "Filtro de tendencia", exit_rsi: "RSI de salida", stop_loss_pct: "Stop loss %", stop_atr_mult: "Stop (× ATR)", position_pct: "Exposición por posición %",
   take_profit_r: "Objetivo (× stop)", position_size_r: "Riesgo por operación %", max_hold_min: "Tiempo máximo (min)" };
 const TF_LABEL = { "1m": "1 min", "5m": "5 min", "15m": "15 min", "1h": "1 h", "4h": "4 h", off: "sin filtro" };
 // Strategy fields with the original behaviour when an older strategy.yaml doesn't have them (strategy.py)
 function stratView(s) {
   return { direction: s.entry.direction, threshold: s.entry.threshold, timeframe: s.entry.timeframe || "1m",
     trend: s.trend_filter || "off", exitRsi: s.exit_rsi ?? 70, stopPct: s.stop_loss_pct, atrMult: s.stop_atr_mult ?? 0,
-    tp: s.take_profit_r ?? 2, risk: s.position_size_r, maxHold: s.max_hold_min ?? 0 };
+    tp: s.take_profit_r ?? 2, risk: s.position_size_r, maxHold: s.max_hold_min ?? 0, posPct: s.position_pct ?? 0 };
 }
 const stopText = (v) => (v.atrMult > 0 ? `${v.atrMult}× ATR` : `${v.stopPct}%`);
 const varLabel = (v) => VAR_LABEL[v] || v;
@@ -1201,7 +1223,87 @@ function renderReflectMini() {
 function renderPosiciones() {
   renderPerformance();
   renderPositions();
+  renderSizing();
 }
+
+// ---------- exposure per position ----------
+// Share of its account a new position of this asset would use now (strategy.size()).
+function positionShare(a) {
+  const v = stratView(a.strategy);
+  if (v.posPct > 0) return Math.min(100, v.posPct);
+  const t = a.tick || {}, price = t.last_price;
+  const stopPct = v.atrMult > 0 && t.atr && price ? (v.atrMult * t.atr / price) * 100 : v.stopPct;
+  return stopPct > 0 ? Math.min(100, (v.risk / stopPct) * 100) : null;
+}
+function sizingSummary(kind) {
+  const assets = state.assets.filter((a) => a.strategy && (kind === "all" || a.kind === kind));
+  const fixed = [...new Set(assets.map((a) => stratView(a.strategy).posPct).filter((x) => x > 0))];
+  const shares = assets.map(positionShare).filter((x) => x != null);
+  if (!assets.length) return { value: "—", note: "" };
+  const byRisk = assets.length - assets.filter((a) => stratView(a.strategy).posPct > 0).length;
+  const lo = Math.min(...shares).toFixed(0), hi = Math.max(...shares).toFixed(0);
+  const range = !shares.length ? "" : lo === hi ? `${lo}% de la cuenta` : `entre ${lo}% y ${hi}% de la cuenta`;
+  if (!byRisk && fixed.length === 1) return { value: `${fixed[0]}% fijo`, note: `las ${assets.length} posiciones usan lo mismo` };
+  if (!fixed.length) return { value: "según riesgo", note: range };
+  return { value: "mixto", note: `${assets.length - byRisk} con tamaño fijo, ${byRisk} según riesgo · ${range}` };
+}
+function renderSizing() {
+  const risk = { max_open_positions: 6, max_open_crypto: 4, max_exposure_pct: 60, ...(state.goal.risk || {}) };
+  const c = sizingSummary("crypto"), st = sizingSummary("stock");
+  document.getElementById("sizing-kpis").replaceChildren(
+    kpi("Criptos", c.value, "", c.note), kpi("ETFs", st.value, "", st.note),
+    kpi("Límites del conjunto", `${risk.max_open_crypto} cripto · ${risk.max_open_positions} total`, "", `exposición máxima ${risk.max_exposure_pct}% del capital`),
+  );
+  sizingPreview();
+}
+function sizingPreview() {
+  if (!state) return;
+  const kind = document.getElementById("sizing-kind").value, raw = document.getElementById("sizing-pct").value;
+  const out = document.getElementById("sizing-preview");
+  if (raw === "") { out.textContent = "Escribe un porcentaje para ver el efecto. 0 vuelve al tamaño según el riesgo."; return; }
+  const pctV = Number(raw);
+  if (!isFinite(pctV) || pctV < 0 || pctV > 100) { out.textContent = "Debe estar entre 0 y 100."; return; }
+  if (pctV === 0) { out.textContent = "Con 0, cada posición vuelve a calcularse por el riesgo por operación y la distancia del stop."; return; }
+  const risk = { max_open_positions: 6, max_open_crypto: 4, max_exposure_pct: 60, ...(state.goal.risk || {}) };
+  const total = state.assets.reduce((s, a) => s + a.paper.equity, 0);
+  const parts = [];
+  for (const k of kind === "all" ? ["crypto", "stock"] : [kind]) {
+    const assets = state.assets.filter((a) => a.kind === k);
+    if (!assets.length) continue;
+    const per = assets.map((a) => (a.paper.equity * pctV) / 100).sort((x, y) => y - x);
+    const maxOpen = k === "crypto" ? Math.min(risk.max_open_crypto, risk.max_open_positions) : risk.max_open_positions;
+    const worst = per.slice(0, maxOpen).reduce((s, v) => s + v, 0);
+    const label = k === "crypto" ? "cripto" : "ETF";
+    parts.push(`cada posición ${label} usará unos ${usd(per[per.length - 1], 0)}–${usd(per[0], 0)} de su cuenta; con ${Math.min(maxOpen, assets.length)} abiertas a la vez serían ${usd(worst, 0)} (${((worst / total) * 100).toFixed(0)}% del capital, límite ${risk.max_exposure_pct}%)`);
+    if (k === "stock") {
+      const stockTotal = assets.reduce((s, a) => s + (a.paper.equity * pctV) / 100, 0);
+      parts.push(`los ETFs compran de verdad en Alpaca: si se abren todos a la vez harían falta ${usd(stockTotal, 0)} de saldo en la cuenta paper`);
+    }
+  }
+  out.textContent = `Con ${pctV}%, ${parts.join("; ")}. Las ganancias y las pérdidas de cada operación crecen en la misma proporción que el tamaño.`;
+}
+document.getElementById("sizing-pct").addEventListener("input", sizingPreview);
+document.getElementById("sizing-kind").addEventListener("change", sizingPreview);
+document.getElementById("sizing-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const kind = document.getElementById("sizing-kind").value, pctV = Number(document.getElementById("sizing-pct").value);
+  if (!isFinite(pctV) || pctV < 0 || pctV > 100) { showResult("sizing-result", "Debe estar entre 0 y 100.", true); return; }
+  const who = { crypto: "todas las criptos", stock: "todos los ETFs", all: "todos los activos" }[kind];
+  const what = pctV > 0 ? `cada posición nueva use el ${pctV}% de la cuenta de su activo` : "el tamaño vuelva a calcularse por riesgo";
+  if (!confirm(`¿Hacer que en ${who} ${what}?\n\nSe guarda como cambio manual en cada estrategia (con su versión) y reinicia el conteo de la reflexión de esos activos. Las posiciones abiertas no cambian.`)) return;
+  const btn = document.getElementById("sizing-btn");
+  btn.disabled = true; btn.textContent = "Aplicando…";
+  showResult("sizing-result", "Guardando…");
+  try {
+    const r = await postJSON("/api/bulk", { kind, changes: { position_pct: pctV } });
+    showResult("sizing-result", r.message.replace(/^./, (x) => x.toUpperCase()));
+    watchSync();
+  } catch (e) {
+    showResult("sizing-result", e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = "Aplicar";
+  }
+});
 function closeAt(c, t) {
   let lo = 0, hi = c.t.length - 1, best = null;
   while (lo <= hi) {
@@ -1290,7 +1392,7 @@ function renderPositions() {
   const host = document.getElementById("positions-table");
   const open = state.assets.filter((a) => a.paper.position);
   document.getElementById("stock-equity").textContent = usd(state.goal.stock_equity_per_asset || 500, 0);
-  table(host, ["Activo", "Entrada", "Ahora", "Stop", "Objetivo", "Valor", "No realizado", ""], open.map((a) => {
+  table(host, ["Activo", "Entrada", "Ahora", "Stop", "Objetivo", "Valor", "% de su cuenta", "No realizado", ""], open.map((a) => {
     const pos = a.paper.position, last = lastPrice(a), u = unrealized(a);
     const closed = a.kind === "stock" && a.tick && a.tick.market === "closed";
     const btn = el("button", { type: "button", class: "danger" }, "Vender");
@@ -1298,6 +1400,7 @@ function renderPositions() {
     btn.addEventListener("click", () => sell(a.asset, btn));
     return [`${a.asset}${pos.manual ? " · manual" : ""} · ${pos.direction}`, priceFmt(pos.entry_price), last != null ? priceFmt(last) : "—",
       priceFmt(pos.stop), priceFmt(pos.target), last != null ? usd(pos.qty * last) : "—",
+      `${((pos.qty * pos.entry_price) / a.paper.equity * 100).toFixed(0)}%`,
       { text: signedUsd(u), cls: signCls(u) }, { node: btn, cls: "act" }];
   }), { empty: "Sin posiciones abiertas." });
 }
@@ -1470,7 +1573,7 @@ function renderDetail() {
       ["Salida por RSI", `${v.direction === "long" ? "≥" : "≤"} ${v.direction === "long" ? v.exitRsi : 100 - v.exitRsi}`],
       ["Stop", stopText(v)], ["Objetivo", v.tp + "× distancia del stop"],
       ["Tiempo máximo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "sin límite"],
-      ["Riesgo por operación", v.risk + "% del capital"],
+      ["Tamaño", v.posPct > 0 ? `fijo: ${v.posPct}% de la cuenta` : `según riesgo: se pierde ${v.risk}% de la cuenta si toca el stop`],
       ["Rentabilidad total", pct(assetTotalRet(a), 3)], ["Comprar y mantener", bh ? `${pct(bh.ret, 3)} desde ${dateTimeFmt(Date.parse(bh.since))}` : "—"],
       ["Profit factor", st.profitFactor == null ? "—" : st.profitFactor === Infinity ? "∞" : st.profitFactor.toFixed(2)],
       ["Máx. drawdown", (a.metrics.max_drawdown * 100).toFixed(2) + "%"],
@@ -1504,7 +1607,8 @@ const SETTINGS = [
   { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1, hint: "solo se usa con Stop (× ATR) en 0" },
   { key: "take_profit_r", label: "Objetivo (× stop)", min: 0.5, max: 10, step: 0.1, fallback: 2.0 },
   { key: "max_hold_min", label: "Tiempo máximo (min)", min: 0, max: 2880, step: 30, fallback: 0, hint: "0 = sin límite" },
-  { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05 },
+  { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05, hint: "sin efecto si la exposición por posición es mayor que 0" },
+  { key: "position_pct", label: "Exposición por posición %", min: 0, max: 100, step: 5, fallback: 0, hint: "% de la cuenta que usa cada posición; 0 = según el riesgo por operación y el stop" },
 ];
 const SELECTS = [
   { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m"], fallback: "1m" },
@@ -1528,7 +1632,9 @@ function renderEditor(a) {
   const refresh = () => {
     const dirty = Object.keys(draft).filter((k) => String(draft[k]) !== String(saved[k]));
     save.disabled = reset.disabled = !dirty.length;
-    if (Number(value("stop_atr_mult")) > 0) {
+    if (Number(value("position_pct")) > 0) {
+      derived.textContent = `Cada posición nueva usará el ${Number(value("position_pct"))}% de la cuenta; el riesgo por operación no se usa.`;
+    } else if (Number(value("stop_atr_mult")) > 0) {
       derived.textContent = "El tamaño de la posición depende de la volatilidad al entrar: se pierde el riesgo por operación si toca el stop (sin apalancamiento).";
     } else {
       const frac = (Number(value("position_size_r")) / Number(value("stop_loss_pct"))) * 100;
@@ -1682,7 +1788,7 @@ function renderEstrategia() {
         e.status === "done" ? `${pct(e.avg_before * 100, 3)} → ${pct(e.avg_after * 100, 3)}` : "—"],
         onClick: () => { selected = a.asset; setTab("activos"); } };
     }), { empty: "Aún no hay cambios de estrategia." });
-  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Dirección", "Velas", "Tendencia", "RSI entrada", "RSI salida", "Stop", "Objetivo ×", "Tiempo máx.", "Riesgo %", "Pendientes", ""],
+  table(document.getElementById("strategies-table"), ["Activo", "Versión", "Dirección", "Velas", "Tendencia", "RSI entrada", "RSI salida", "Stop", "Objetivo ×", "Tiempo máx.", "Tamaño", "Pendientes", ""],
     state.assets.filter((a) => a.strategy).map((a) => {
       const v = stratView(a.strategy);
       const lastH = a.hypotheses[a.hypotheses.length - 1];
@@ -1690,7 +1796,7 @@ function renderEstrategia() {
       const b = el("button", { type: "button", class: "small" }, "Editar");
       b.addEventListener("click", () => { selected = a.asset; setTab("activos"); setTimeout(() => document.getElementById("editor").scrollIntoView({ behavior: "smooth", block: "center" }), 50); });
       return [a.asset, "v" + a.strategy.version, v.direction, TF_LABEL[v.timeframe], TF_LABEL[v.trend], String(v.threshold), String(v.exitRsi),
-        stopText(v), String(v.tp), v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", String(v.risk),
+        stopText(v), String(v.tp), v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", v.posPct > 0 ? `${v.posPct}% fijo` : `riesgo ${v.risk}%`,
         `${Math.min(pending, state.goal.reflection_every)}/${state.goal.reflection_every}`, { node: b, cls: "act" }];
     }));
 }

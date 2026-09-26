@@ -592,6 +592,30 @@ class Worker:
                 return book
         raise ValueError(f"{asset} no lo opera este worker")
 
+    async def set_strategy_all(self, changes: dict, kind: str = "all") -> str:
+        """The same hand-edited settings on every asset of a kind (all, crypto or stock)."""
+        if kind not in ("all", "crypto", "stock"):
+            raise ValueError("kind debe ser all, crypto o stock")
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("no hay cambios que guardar")
+        changed, unchanged, failed = [], 0, []
+        for book in list(self.books):
+            if kind != "all" and kind != ("stock" if config.is_stock(book.asset) else "crypto"):
+                continue
+            try:
+                message = await book.set_strategy(changes)
+            except ValueError as e:
+                failed.append(f"{book.asset}: {e}")
+                continue
+            if message == "sin cambios":
+                unchanged += 1
+            else:
+                changed.append(book.asset)
+        if not changed and failed:
+            raise ValueError("; ".join(failed)[:300])
+        text = f"{len(changed)} activos actualizados" + (f", {unchanged} ya lo tenían" if unchanged else "")
+        return text + (f"; no se pudo en {'; '.join(failed)}" if failed else "")
+
     async def add_asset(self, asset: str, buy: bool) -> str:
         """Start trading a new asset: check it has prices, record it in goal.yaml, open a book."""
         asset = config.normalize_asset(asset, "stock" if config.is_stock(asset) else "crypto")
