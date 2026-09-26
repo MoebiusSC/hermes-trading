@@ -154,6 +154,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
                 trend_at[i] = bool(tc[j] > ema[j]) if p["direction"] == "long" else bool(tc[j] < ema[j])
 
     equity, pos, pending, trades, in_market = start_equity, None, None, [], 0
+    equity_curve = [{"ts": _iso(t[warmup - 1] if warmup < n else t[0]), "equity": float(start_equity)}]
     sign = 1 if p["direction"] == "long" else -1
     buy_side, sell_side = ("buy", "sell") if sign > 0 else ("sell", "buy")
 
@@ -192,6 +193,15 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             elif hit_target:
                 level = max(o[i], pos["target"]) if sign > 0 else min(o[i], pos["target"])
                 close_at(rules.fill(level, sell_side, slippage), t[i] + tfe, "take_profit")
+        # Mark the portfolio to market after fills/stops for drawdown and time-series Sharpe.
+        mark_price = c[i]
+        marked = equity
+        if pos:
+            gross = sign * pos["qty"] * (mark_price - pos["entry_price"])
+            estimated_exit_fee = pos["qty"] * mark_price * fee
+            marked += gross - pos["fees"] - estimated_exit_fee
+        equity_curve.append({"ts": _iso(t[i] + tfe), "equity": float(marked)})
+
         # 3) decisions at this bar's close
         if i == n - 1:
             break
@@ -205,13 +215,13 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
     if pos:  # mark an open position to the last close, as a trade, so its loss or gain counts
         close_at(rules.fill(c[-1], sell_side, slippage), t[-1] + tfe, "end_of_test")
     return {"trades": trades, "bars": n, "in_market_pct": in_market / max(1, n - warmup) * 100,
-            "final_equity": equity, "start_equity": start_equity}
+            "final_equity": equity, "start_equity": start_equity, "equity_curve": equity_curve}
 
 
-def summarize(trades: list[dict], goal: dict) -> dict:
+def summarize(trades: list[dict], goal: dict, equity_curve: list[dict] | None = None) -> dict:
     wins = [x["pnl"] for x in trades if x["pnl"] > 0]
     losses = [-x["pnl"] for x in trades if x["pnl"] < 0]
-    m = metrics(trades)
+    m = metrics(trades, equity_curve)
     return {
         "n": len(trades),
         "score": score(trades, goal),
@@ -240,15 +250,21 @@ def run(asset: str, strategy: dict, goal: dict, days: float = DEFAULT_DAYS) -> d
     split_ms = entry["t"][0] + (entry["t"][-1] - entry["t"][0]) * (1 - OOS_FRACTION)
     split = _iso(split_ms)
     first, last = entry["close"][0], entry["close"][-1]
+    all_trades = sim["trades"]
+    in_trades = [x for x in all_trades if x["opened_at"] < split]
+    oos_trades = [x for x in all_trades if x["opened_at"] >= split]
+    curve = sim["equity_curve"]
+    in_curve = [p for p in curve if p["ts"] < split]
+    oos_curve = [p for p in curve if p["ts"] >= split]
     return {
         "asset": asset,
         "from": _iso(entry["t"][0]), "to": _iso(entry["t"][-1]), "split": split, "days": days,
         "timeframe": p["timeframe"], "source": entry.get("source"), "fee_pct": fee * 100, "slippage_pct": slippage * 100,
         "in_market_pct": round(sim["in_market_pct"], 1),
         "buy_hold_pct": round((last / first - 1) * 100, 3),
-        "all": summarize(sim["trades"], goal),
-        "in_sample": summarize([x for x in sim["trades"] if x["opened_at"] < split], goal),
-        "out_of_sample": summarize([x for x in sim["trades"] if x["opened_at"] >= split], goal),
+        "all": summarize(all_trades, goal, curve),
+        "in_sample": summarize(in_trades, goal, in_curve),
+        "out_of_sample": summarize(oos_trades, goal, oos_curve),
     }
 
 
