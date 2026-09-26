@@ -11,7 +11,8 @@ from ..config import env
 from . import SCHEMA_VERSION
 
 # OKX before Kraken: some Kraken USDT pairs barely trade (79% of BNB/USDT's 15m candles were flat),
-# which shrinks ATR and distorts RSI.
+# which shrinks ATR and distorts RSI. A thin source is skipped while another has the pair, and used
+# when it's the only one left (PAXG/USDT on Railway: Binance is geo-blocked, Kraken doesn't list it).
 FALLBACK_EXCHANGES = ("binance", "okx", "kraken")
 MIN_CANDLES = 20
 MAX_FLAT_SHARE = 0.5  # candles with high == low; above this the market is too thin to trade on
@@ -50,20 +51,26 @@ async def fetch(asset: str) -> dict:
         order.remove(preferred)
         order.insert(0, preferred)
 
-    errors = []
-    for exchange_id in order:
-        try:
-            client = _client(exchange_id, exchange_id == primary)
-            candles = await client.fetch_ohlcv(asset, timeframe="1m", limit=100)
-        except Exception as e:  # geo-blocks, symbol not listed, network
-            errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
-            continue
-        if _thin(candles):
-            errors.append(f"{exchange_id}: too many flat candles (illiquid)")
-            continue
-        if len(candles) < MIN_CANDLES:
-            errors.append(f"{exchange_id}: only {len(candles)} candles")
-            continue
+    errors, thin = [], None
+    for exchange_id in order + [None]:
+        if exchange_id is None:  # every source was thin or failed: a thin one beats no price at all
+            if thin is None:
+                break
+            exchange_id, candles = thin
+        else:
+            try:
+                client = _client(exchange_id, exchange_id == primary)
+                candles = await client.fetch_ohlcv(asset, timeframe="1m", limit=100)
+            except Exception as e:  # geo-blocks, symbol not listed, network
+                errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
+                continue
+            if len(candles) < MIN_CANDLES:
+                errors.append(f"{exchange_id}: only {len(candles)} candles")
+                continue
+            if _thin(candles):
+                errors.append(f"{exchange_id}: too many flat candles (illiquid)")
+                thin = thin or (exchange_id, candles)
+                continue
         _preferred[asset] = exchange_id
         return {
             "schema_version": SCHEMA_VERSION,
@@ -115,19 +122,25 @@ async def ohlcv(asset: str, tf: str, limit: int) -> dict:
     if preferred in order:
         order.remove(preferred)
         order.insert(0, preferred)
-    errors = []
-    for exchange_id in order:
-        try:
-            rows = await _fetch_pages(_client(exchange_id, exchange_id == primary), asset, tf, limit, TF_SECONDS[tf] * 1000)
-        except Exception as e:
-            errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
-            continue
-        if not rows:
-            errors.append(f"{exchange_id}: no {tf} candles")
-            continue
-        if _thin(rows):
-            errors.append(f"{exchange_id}: too many flat {tf} candles (illiquid)")
-            continue
+    errors, thin = [], None
+    for exchange_id in order + [None]:
+        if exchange_id is None:  # only thin sources: use the first rather than none
+            if thin is None:
+                break
+            exchange_id, rows = thin
+        else:
+            try:
+                rows = await _fetch_pages(_client(exchange_id, exchange_id == primary), asset, tf, limit, TF_SECONDS[tf] * 1000)
+            except Exception as e:
+                errors.append(f"{exchange_id}: {type(e).__name__}: {e}"[:160])
+                continue
+            if not rows:
+                errors.append(f"{exchange_id}: no {tf} candles")
+                continue
+            if _thin(rows):
+                errors.append(f"{exchange_id}: too many flat {tf} candles (illiquid)")
+                thin = thin or (exchange_id, rows)
+                continue
         candles = {"t": [int(r[0]) for r in rows], "open": [float(r[1]) for r in rows], "high": [float(r[2]) for r in rows],
                    "low": [float(r[3]) for r in rows], "close": [float(r[4]) for r in rows]}
         _ohlcv_cache[key] = (time.monotonic(), candles)
