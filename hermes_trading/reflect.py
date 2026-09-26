@@ -205,6 +205,61 @@ def apply(
     return record
 
 
+def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool) -> list[dict]:
+    """Settings changed by hand from the dashboard. Same bounds, versioning and hypothesis log as a
+    reflection, but no per-cycle step limit and several variables at once. The log entry also
+    restarts the reflection cadence, so the new settings get `reflection_every` trades first."""
+    strategy = load_yaml(paths.strategy)
+    updated = copy.deepcopy(strategy)
+    diffs = []
+    for variable, requested in changes.items():
+        if variable == "entry.direction":
+            new = str(requested)
+            if new not in ("long", "short"):
+                raise ValueError("la dirección debe ser long o short")
+            if stock and new != "long":
+                raise ValueError("las acciones y los ETFs solo operan en long")
+        elif variable in TUNABLE:
+            lo, hi = TUNABLE[variable]
+            try:
+                new = round(float(requested), 4)
+            except (TypeError, ValueError):
+                raise ValueError(f"{variable} debe ser un número") from None
+            if not lo <= new <= hi:
+                raise ValueError(f"{variable} debe estar entre {lo:g} y {hi:g}")
+        else:
+            raise ValueError(f"{variable!r} no se puede cambiar; permitidos: entry.direction, {', '.join(sorted(TUNABLE))}")
+        try:
+            old = get_path(strategy, variable)
+        except KeyError:
+            old = TUNABLE_DEFAULTS[variable]
+        if isinstance(old, int) and isinstance(new, float) and new.is_integer():
+            new = int(new)
+        if new != old:
+            set_path(updated, variable, new)
+            diffs.append((variable, old, new))
+    if not diffs:
+        return []
+
+    prior_version = str(strategy["version"])
+    dump_yaml(paths.history / f"v{int(prior_version):04d}.yaml", strategy)
+    updated["version"] = f"{int(prior_version) + 1:02d}"
+    dump_yaml(paths.strategy, updated)
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    records = []
+    for variable, old, new in diffs:
+        record = {
+            "ts": ts, "asset": paths.asset, "mode": "manual",
+            "from_version": prior_version, "to_version": updated["version"],
+            "variable": variable, "old_value": old, "new_value": new,
+            "requested_value": new, "clamped": False,
+            "rationale": "Cambiado a mano desde el dashboard.", "predicted_direction": None,
+        }
+        append_jsonl(paths.hypotheses, record)
+        records.append(record)
+    return records
+
+
 def reflect_asset(asset: str, goal: dict, hermes: bool, force: bool) -> str:
     """One reflection cycle for one asset; returns a one-line report."""
     paths = config.asset_paths(asset)

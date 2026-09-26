@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from rich.console import Console
 
-from . import config
+from . import config, reflect
 from .adapters import SchemaError, alpaca, check_schema, macro, news, onchain, price, stocks
 from .adapters.alpaca import AlpacaError
 from .storage import load_yaml, write_json
@@ -295,18 +295,38 @@ class AssetBook:
         async with self.lock:
             pos = self.paper["position"]
             if not pos:
-                raise ValueError(f"{self.asset} has no open position")
+                raise ValueError(f"{self.asset} no tiene una posición abierta")
             return await self._manual_sell(pos)
 
     async def _manual_sell(self, pos: dict) -> str:
         last, rsi_value = await self._quote()
         await self._record_close(last, "manual_close", rsi_value)
-        return f"closed {pos['direction']} @ {last:g} (simulated fill)"
+        return f"{pos['direction']} cerrado a {last:g} (ejecución simulada)"
+
+    async def set_strategy(self, changes: dict) -> str:
+        """Hand-edited strategy settings. They apply from the next tick; an open position's stop
+        and target are re-aimed from its entry price, since those are the exits it will use."""
+        async with self.lock:
+            records = reflect.apply_manual(self.paths, changes, config.is_stock(self.asset))
+            if not records:
+                return "sin cambios"
+            pos = self.paper["position"]
+            note = ""
+            if pos and any(r["variable"] in ("stop_loss_pct", "take_profit_r") for r in records):
+                strategy = load_yaml(self.paths.strategy)
+                sign = 1 if pos["direction"] == "long" else -1
+                stop_frac = float(strategy["stop_loss_pct"]) / 100
+                pos["stop"] = pos["entry_price"] * (1 - sign * stop_frac)
+                pos["target"] = pos["entry_price"] * (1 + sign * stop_frac * float(strategy.get("take_profit_r", 2.0)))
+                self._save_paper()
+                note = f"; la posición abierta ahora sale en stop {pos['stop']:g} / objetivo {pos['target']:g}"
+            changed = ", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records)
+            return f"v{records[0]['from_version']} → v{records[0]['to_version']}: {changed}{note}"
 
     async def manual_buy(self) -> str:
         async with self.lock:
             if self.paper["position"]:
-                raise ValueError(f"{self.asset} already has an open position")
+                raise ValueError(f"{self.asset} ya tiene una posición abierta")
             strategy = load_yaml(self.paths.strategy)
             self._check_strategy(strategy)
             return await self._manual_buy(strategy)
@@ -315,7 +335,7 @@ class AssetBook:
         last, rsi_value = await self._quote()
         self.paper["position"] = self._position(strategy, last, self._size(strategy, last), rsi_value, {}, manual=True)
         self._save_paper()
-        return f"opened {strategy['entry']['direction']} @ {last:g} (simulated fill)"
+        return f"{strategy['entry']['direction']} abierto a {last:g} (ejecución simulada)"
 
 
 class StockBook(AssetBook):
@@ -370,21 +390,27 @@ class StockBook(AssetBook):
         self.session = await alpaca.client().session()
         if not self.session["is_open"]:
             opens = self.session["next_open"][:16].replace("T", " ")
-            raise ValueError(f"market is closed — {self.asset} can be traded from {opens} ET")
+            raise ValueError(f"el mercado está cerrado: {self.asset} se puede operar desde {opens} ET")
 
     async def _manual_sell(self, pos: dict) -> str:
         await self._require_open_market()
         _, rsi_value = await self._quote()
-        return await self._sell("manual_close", rsi_value)
+        result = await self._sell("manual_close", rsi_value)
+        if result.startswith("closed"):
+            return result.replace("closed long (manual_close) @", "long vendido en Alpaca a")
+        raise ValueError(result)
 
     async def _manual_buy(self, strategy: dict) -> str:
         if strategy["entry"]["direction"] != "long":
-            raise ValueError("stocks are long-only here")
+            raise ValueError("las acciones y los ETFs solo operan en long")
         await self._require_open_market()
         if await alpaca.client().position(self.asset) is not None:
-            raise ValueError(f"Alpaca already holds {self.asset} outside this worker")
+            raise ValueError(f"Alpaca ya tiene {self.asset} fuera de este worker")
         last, rsi_value = await self._quote()
-        return await self._buy(strategy, last, rsi_value, {}, manual=True)
+        result = await self._buy(strategy, last, rsi_value, {}, manual=True)
+        if not result.startswith("opened"):
+            raise ValueError(result)
+        return result.replace("opened long", "long comprado en Alpaca:").replace(" @ ", " a ")
 
     async def _buy(self, strategy: dict, last: float, rsi_value: float, data: dict, **extra) -> str:
         qty = math.floor(self._size(strategy, last) * 1e6) / 1e6
@@ -445,27 +471,27 @@ class Worker:
         for book in self.books:
             if book.asset == asset:
                 return book
-        raise ValueError(f"{asset} is not traded by this worker")
+        raise ValueError(f"{asset} no lo opera este worker")
 
     async def add_asset(self, asset: str, buy: bool) -> str:
         """Start trading a new asset: check it has prices, record it in goal.yaml, open a book."""
         asset = config.normalize_asset(asset, "stock" if config.is_stock(asset) else "crypto")
         if any(book.asset == asset for book in self.books):
-            raise ValueError(f"{asset} is already traded")
+            raise ValueError(f"{asset} ya se está operando")
         adapter = stocks.fetch if config.is_stock(asset) else price.fetch
         try:
             await adapter(asset)
         except Exception as e:
-            raise ValueError(f"no price data for {asset}: {e}"[:300]) from e
+            raise ValueError(f"no hay datos de precio para {asset}: {e}"[:300]) from e
         config.add_goal_asset(config.GOAL_FILE, asset)
         book = make_book(asset, load_yaml(config.GOAL_FILE))
         self.books.append(book)
-        message = f"added {asset} with a ${book.start_equity:,.0f} paper account"
+        message = f"{asset} añadido con una cuenta simulada de ${book.start_equity:,.0f}".replace(",", ".")
         if buy:
             try:
                 message += "; " + await book.manual_buy()
             except ValueError as e:
-                message += f"; not bought: {e}"
+                message += f"; no se compró: {e}"
         return message
 
     def _heartbeat(self, state: str, assets: dict | None = None, **fields) -> None:

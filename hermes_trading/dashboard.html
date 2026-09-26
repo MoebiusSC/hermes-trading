@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -83,6 +83,15 @@ td.act { text-align: right; padding-right: 0; }
 td.act button { padding: 3px 12px; font-size: 13px; }
 button.danger { color: var(--delta-down); border-color: color-mix(in srgb, var(--delta-down) 45%, transparent); }
 button.danger:hover { background: color-mix(in srgb, var(--delta-down) 8%, transparent); }
+.settings td { padding-top: 4px; padding-bottom: 4px; }
+.settings input[type=number], .settings select {
+  font: inherit; font-size: 13px; color: var(--text-primary); background: var(--page); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 6px; width: 76px; font-variant-numeric: tabular-nums;
+}
+.settings select { width: auto; }
+.settings input.dirty, .settings select.dirty { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.settings td.derived { color: var(--text-secondary); }
+.settings td.act button { padding: 3px 10px; }
 form.add { display: grid; gap: 10px; margin-top: 8px; }
 form.add .row { display: flex; gap: 8px; flex-wrap: wrap; }
 form.add select, form.add input[type=text] {
@@ -159,11 +168,11 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
 <main>
   <header>
     <h1>Hermes Trading</h1>
-    <span class="pill" id="worker-pill"><span class="icon" aria-hidden="true">○</span><span>Loading…</span></span>
-    <span class="pill"><span class="icon" aria-hidden="true">◆</span><span>Paper mode</span></span>
+    <span class="pill" id="worker-pill"><span class="icon" aria-hidden="true">○</span><span>Cargando…</span></span>
+    <span class="pill"><span class="icon" aria-hidden="true">◆</span><span>Modo simulado</span></span>
     <span class="spacer"></span>
     <span class="sub" id="synced">—</span>
-    <button id="sync-btn" type="button">Sync from Railway</button>
+    <button id="sync-btn" type="button">Sincronizar con Railway</button>
   </header>
   <div class="banner" id="banner" role="status"></div>
 
@@ -174,11 +183,11 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
       <section class="panel">
         <div class="chart-head">
           <div>
-            <h2>Crypto · return by asset</h2>
-            <div class="sub" id="crypto-sub">Realized paper return since each asset's first trade, as % of its own paper account</div>
+            <h2>Criptos · rentabilidad por activo</h2>
+            <div class="sub" id="crypto-sub">Rentabilidad realizada desde la primera operación de cada activo, en % de su propia cuenta simulada</div>
           </div>
           <span class="spacer"></span>
-          <button type="button" data-table="crypto">Table</button>
+          <button type="button" data-table="crypto">Tabla</button>
         </div>
         <div class="kpis" id="crypto-kpis"></div>
         <div class="legend" id="crypto-legend"></div>
@@ -188,11 +197,11 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
       <section class="panel">
         <div class="chart-head">
           <div>
-            <h2>ETFs · return by asset</h2>
-            <div class="sub" id="stock-sub">Realized paper return since each asset's first trade, as % of its own paper account</div>
+            <h2>ETFs · rentabilidad por activo</h2>
+            <div class="sub" id="stock-sub">Rentabilidad realizada desde la primera operación de cada activo, en % de su propia cuenta simulada</div>
           </div>
           <span class="spacer"></span>
-          <button type="button" data-table="stock">Table</button>
+          <button type="button" data-table="stock">Tabla</button>
         </div>
         <div class="kpis" id="stock-kpis"></div>
         <div class="legend" id="stock-legend"></div>
@@ -204,20 +213,20 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
     <section class="panel section">
       <div class="chart-head">
         <div>
-          <h2>Open positions · performance</h2>
-          <div class="sub">Unrealized P&amp;L of every position still open, marked to the live one-minute prices</div>
+          <h2>Posiciones abiertas · desempeño</h2>
+          <div class="sub">P&amp;L no realizado de cada posición abierta, valorado con los precios de 1 minuto en vivo</div>
         </div>
       </div>
       <div class="kpis" id="perf-kpis"></div>
       <div class="actions-grid" style="margin-top:0">
         <div>
-          <h2>Total unrealized P&amp;L over time</h2>
-          <div class="sub">Last 3 hours · each position counts from its entry</div>
+          <h2>P&amp;L no realizado total en el tiempo</h2>
+          <div class="sub">Últimas 3 horas · cada posición cuenta desde su entrada</div>
           <div class="chart" id="perf-chart"></div>
         </div>
         <div>
-          <h2>Histogram by position</h2>
-          <div class="sub">Unrealized return on each position's cost</div>
+          <h2>Histograma por posición</h2>
+          <div class="sub">Rentabilidad no realizada sobre el coste de cada posición</div>
           <div class="chart" id="perf-bars"></div>
         </div>
       </div>
@@ -225,64 +234,71 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
 
     <div class="actions-grid">
       <section class="panel">
-        <h2>Open positions</h2>
-        <div class="sub">Sell closes the position at the current price and returns the proceeds to that asset's paper account. ETFs sell at Alpaca during market hours.</div>
+        <h2>Posiciones abiertas</h2>
+        <div class="sub">Vender cierra la posición al precio actual y devuelve el dinero a la cuenta simulada de ese activo. Los ETFs se venden en Alpaca en horario de mercado.</div>
         <div class="table-wrap" id="positions-table"></div>
         <div class="result" id="sell-result" role="status"></div>
       </section>
       <section class="panel">
-        <h2>Add asset</h2>
-        <div class="sub">Starts trading it with the default strategy. Crypto gets a $10,000 paper account, ETFs <span id="stock-equity">$200</span>.</div>
+        <h2>Añadir activo</h2>
+        <div class="sub">Empieza a operarlo con la estrategia por defecto. Cada cripto recibe una cuenta simulada de $10.000 y cada ETF <span id="stock-equity">$200</span>.</div>
         <form class="add" id="add-form">
           <div class="row">
-            <select id="add-kind" aria-label="Asset type">
-              <option value="crypto">Crypto (vs USDT)</option>
-              <option value="stock">ETF / stock</option>
+            <select id="add-kind" aria-label="Tipo de activo">
+              <option value="crypto">Cripto (contra USDT)</option>
+              <option value="stock">ETF / acción</option>
             </select>
-            <input type="text" id="add-symbol" placeholder="e.g. DOT or IWM" aria-label="Symbol" required maxlength="20" autocomplete="off">
+            <input type="text" id="add-symbol" placeholder="p. ej. DOT o IWM" aria-label="Símbolo" required maxlength="20" autocomplete="off">
           </div>
-          <label class="check"><input type="checkbox" id="add-buy" checked> Buy now at market (strategy position size)</label>
-          <div class="row"><button type="submit" id="add-btn">Add asset</button></div>
+          <label class="check"><input type="checkbox" id="add-buy" checked> Comprar ya a mercado (tamaño según la estrategia)</label>
+          <div class="row"><button type="submit" id="add-btn">Añadir activo</button></div>
           <div class="result" id="add-result" role="status"></div>
         </form>
       </section>
     </div>
 
+    <section class="panel section">
+      <h2>Ajustes de estrategia</h2>
+      <div class="sub">Cómo opera el algoritmo de cada activo: entra cuando el RSI cruza el nivel de entrada y sale en el stop, en el objetivo (un múltiplo de la distancia del stop) o con RSI 70/30. Los cambios se aplican desde el siguiente minuto, recalculan el stop y el objetivo de una posición abierta, quedan en el historial de la estrategia y reinician el conteo de la reflexión de ese activo.</div>
+      <div class="table-wrap settings" id="settings-table"></div>
+      <div class="result" id="settings-result" role="status"></div>
+    </section>
+
     <section class="section">
-      <div class="cards" id="cards" role="group" aria-label="Select an asset"></div>
+      <div class="cards" id="cards" role="group" aria-label="Selecciona un activo"></div>
     </section>
 
     <div class="detail">
       <div class="stack">
         <section class="panel">
           <div class="chart-head">
-            <div><h2 id="price-title">Price</h2><div class="sub" id="price-sub">Last 180 one-minute closes</div></div>
+            <div><h2 id="price-title">Precio</h2><div class="sub" id="price-sub">Últimos 180 cierres de 1 minuto</div></div>
             <span class="spacer"></span>
-            <button type="button" data-table="price">Table</button>
+            <button type="button" data-table="price">Tabla</button>
           </div>
           <div class="chart" id="price-chart"></div>
           <div class="table-wrap" id="price-table" hidden></div>
         </section>
         <section class="panel">
           <div class="chart-head">
-            <div><h2>RSI (14)</h2><div class="sub" id="rsi-sub">Entry and exit levels from the current strategy</div></div>
+            <div><h2>RSI (14)</h2><div class="sub" id="rsi-sub">Niveles de entrada y salida de la estrategia actual</div></div>
           </div>
           <div class="chart" id="rsi-chart"></div>
         </section>
         <section class="panel">
-          <h2>Closed trades</h2>
+          <h2>Operaciones cerradas</h2>
           <div class="table-wrap" id="trades-table"></div>
         </section>
       </div>
       <div class="stack">
         <section class="panel">
-          <h2 id="strategy-title">Strategy</h2>
+          <h2 id="strategy-title">Estrategia</h2>
           <div class="sub" id="strategy-sub"></div>
           <dl class="params" id="params"></dl>
         </section>
         <section class="panel">
-          <h2>Strategy history</h2>
-          <div class="sub">One variable changed per reflection</div>
+          <h2>Historial de la estrategia</h2>
+          <div class="sub">Una variable por reflexión; los cambios manuales pueden tocar varias</div>
           <ul class="history" id="history"></ul>
         </section>
       </div>
@@ -313,13 +329,41 @@ function priceFmt(v) {
 const timeFmt = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const dateTimeFmt = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function ago(iso) {
-  if (!iso) return "never";
+  if (!iso) return "nunca";
   const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.round(s / 60) + " min ago";
-  if (s < 86400) return Math.round(s / 3600) + " h ago";
-  return Math.round(s / 86400) + " d ago";
+  if (s < 60) return "ahora mismo";
+  if (s < 3600) return "hace " + Math.round(s / 60) + " min";
+  if (s < 86400) return "hace " + Math.round(s / 3600) + " h";
+  return "hace " + Math.round(s / 86400) + " d";
 }
+// The worker reports each tick's decision in English (it also goes to its logs); translate here.
+const REASONS = { stop_loss: "stop loss", take_profit: "objetivo", rsi_exit: "salida por RSI", manual_close: "venta manual",
+  external_close: "cierre externo", missing_at_broker: "no encontrada en el bróker" };
+const reasonEs = (r) => REASONS[r] || String(r).replace(/_/g, " ");
+const DECISIONS = [
+  [/^no signal$/, "Sin señal"],
+  [/^holding (long|short) \(exit blocked by day-trade rule until next session\)$/, "Manteniendo $1 (salida bloqueada por la regla de day trading hasta la próxima sesión)"],
+  [/^holding (long|short)$/, "Manteniendo $1"],
+  [/^opened (long|short)(.*)$/, "Abierto $1$2"],
+  [/^closed (long|short) \((\w+)\)(.*)$/, (m, d, r, rest) => `Cerrado ${d} (${reasonEs(r)})${rest}`],
+  [/^market closed · opens (.+) ET$/, "Mercado cerrado · abre $1 ET"],
+  [/^warming up · entries from (\d+) min after the open$/, "Calentando · entradas desde $1 min tras la apertura"],
+  [/^skip: no price data$/, "Omitido: sin datos de precio"],
+  [/^skip: Alpaca holds a position this worker didn't open$/, "Omitido: Alpaca tiene una posición que este worker no abrió"],
+  [/^skip: order (.+) is below Alpaca's (.+) minimum$/, "Omitido: la orden de $1 está por debajo del mínimo de $2 de Alpaca"],
+  [/^skip: (.*)$/, "Omitido: $1"],
+  [/^entry rejected: (.*)$/, "Entrada rechazada: $1"],
+  [/^exit \((\w+)\) blocked by day-trade rule — holding until next session$/, (m, r) => `Salida (${reasonEs(r)}) bloqueada por la regla de day trading: se mantiene hasta la próxima sesión`],
+  [/^position was closed outside the worker — recorded$/, "La posición se cerró fuera del worker (registrada)"],
+  [/^position missing at Alpaca and no sell found — recorded at last price$/, "Posición no encontrada en Alpaca y sin venta: registrada al último precio"],
+  [/^position already gone at Alpaca — reconciling next tick$/, "La posición ya no está en Alpaca: se concilia en el próximo ciclo"],
+  [/^error$/, "Error"],
+];
+function decisionEs(text) {
+  for (const [re, out] of DECISIONS) if (re.test(text)) return text.replace(re, out);
+  return text.replace(/^./, (x) => x.toUpperCase());
+}
+
 function el(tag, attrs = {}, text) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -378,7 +422,7 @@ function timeTicks(x0, x1, maxTicks) {
 function lineChart(host, opts) {
   host.replaceChildren();
   const pts = opts.series.flatMap((s) => s.points);
-  if (!pts.length) { host.append(el("div", { class: "empty" }, opts.emptyText || "No data yet")); return; }
+  if (!pts.length) { host.append(el("div", { class: "empty" }, opts.emptyText || "Aún sin datos")); return; }
   const W = Math.max(280, host.clientWidth), H = opts.height || 220;
   const hasRefs = (opts.refs || []).length > 0;
   const m = { l: 60, r: opts.endLabels || hasRefs ? 118 : 16, t: 10, b: 26 };
@@ -398,7 +442,7 @@ function lineChart(host, opts) {
   const yFmt = opts.yFmt || ((v) => v.toFixed(decimalsFor(yt.step)));
 
   const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, tabindex: "0", role: "img",
-    "aria-label": opts.label || "chart" });
+    "aria-label": opts.label || "gráfico" });
   // grid + y axis
   for (const t of yt.ticks) {
     root.append(svg("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: css("--grid"), "stroke-width": 1 }));
@@ -542,7 +586,7 @@ function sparkline(host, values, color) {
 
 function table(host, headers, rows) {
   host.replaceChildren();
-  if (!rows.length) { host.append(el("div", { class: "muted" }, "Nothing yet")); return; }
+  if (!rows.length) { host.append(el("div", { class: "muted" }, "Aún no hay nada")); return; }
   const t = el("table"), thead = el("thead"), tr = el("tr");
   headers.forEach((h) => tr.append(el("th", {}, h)));
   thead.append(tr); t.append(thead);
@@ -563,18 +607,18 @@ function renderHeader() {
   const pill = document.getElementById("worker-pill");
   const w = state.worker || {};
   const hbAgeAtPull = state.pulled_at && w.ts ? (Date.parse(state.pulled_at) - Date.parse(w.ts)) / 1000 : Infinity;
-  let icon = "●", label = "Worker running", color = "--good";
-  if (w.state === "halted") { icon = "✖"; label = "Worker halted"; color = "--critical"; }
-  else if (w.state === "error") { icon = "▲"; label = "Worker error"; color = "--serious"; }
-  else if (hbAgeAtPull > 300) { icon = "▲"; label = "No recent heartbeat"; color = "--warning"; }
+  let icon = "●", label = "Worker en marcha", color = "--good";
+  if (w.state === "halted") { icon = "✖"; label = "Worker detenido"; color = "--critical"; }
+  else if (w.state === "error") { icon = "▲"; label = "Error del worker"; color = "--serious"; }
+  else if (hbAgeAtPull > 300) { icon = "▲"; label = "Sin señal reciente del worker"; color = "--warning"; }
   pill.children[0].textContent = icon; pill.children[0].style.color = css(color);
-  pill.children[1].textContent = `${label}${w.ts ? " · last tick " + timeFmt(Date.parse(w.ts)) : ""}`;
+  pill.children[1].textContent = `${label}${w.ts ? " · último ciclo " + timeFmt(Date.parse(w.ts)) : ""}`;
   const syncing = state.sync && state.sync.running;
-  document.getElementById("synced").textContent = syncing ? "Syncing from Railway…" : `Railway data synced ${ago(state.pulled_at)}`;
+  document.getElementById("synced").textContent = syncing ? "Sincronizando con Railway…" : `Datos de Railway sincronizados ${ago(state.pulled_at)}`;
   document.getElementById("sync-btn").disabled = !!syncing;
   document.getElementById("content").classList.toggle("stale", !!syncing);
   const banner = document.getElementById("banner");
-  if (state.sync && state.sync.error) { banner.textContent = "Last sync failed: " + state.sync.error; banner.classList.add("show"); }
+  if (state.sync && state.sync.error) { banner.textContent = "Falló la última sincronización: " + state.sync.error; banner.classList.add("show"); }
   else banner.classList.remove("show");
 }
 
@@ -597,11 +641,11 @@ function renderTiles() {
   const dir = (v) => (v > 0 ? "up" : v < 0 ? "down" : "sub");
   const arrow = (v) => (v > 0 ? "▲ " : v < 0 ? "▼ " : "");
   document.getElementById("tiles").replaceChildren(
-    tile("Paper equity (realized)", usd(equity), `${arrow(realized)}${signedUsd(realized)} (${pct((realized / start) * 100, 3)}) on ${usd(start, 0)}`, dir(realized), true),
-    tile("Unrealized P&L", signedUsd(unreal), open ? `${open} open position${open > 1 ? "s" : ""}, at live prices` : "No open positions"),
-    tile("Closed trades", String(closed), closed ? `${Math.round((wins / closed) * 100)}% winners` : "Waiting for the first exit"),
-    tile("Open positions", `${open} of ${A.length}`),
-    tile("Strategy changes", String(changes), `Reflection every ${state.goal.reflection_every} closed trades per asset`),
+    tile("Capital simulado (realizado)", usd(equity), `${arrow(realized)}${signedUsd(realized)} (${pct((realized / start) * 100, 3)}) sobre ${usd(start, 0)}`, dir(realized), true),
+    tile("P&L no realizado", signedUsd(unreal), open ? `${open} posici${open > 1 ? "ones abiertas" : "ón abierta"}, a precios en vivo` : "Sin posiciones abiertas"),
+    tile("Operaciones cerradas", String(closed), closed ? `${Math.round((wins / closed) * 100)}% ganadoras` : "Esperando la primera salida"),
+    tile("Posiciones abiertas", `${open} de ${A.length}`),
+    tile("Cambios de estrategia", String(changes), `Reflexión cada ${state.goal.reflection_every} operaciones cerradas por activo`),
   );
 }
 
@@ -618,7 +662,7 @@ function renderReturns(kind) {
   const series = returnSeries(assets);
   const accounts = [...new Set(assets.map((a) => a.start_equity))].sort((x, y) => x - y).map((v) => usd(v, 0)).join(" / ");
   document.getElementById(kind + "-sub").textContent =
-    `Realized paper return since each asset's first trade, as % of its own paper account (${accounts})`;
+    `Rentabilidad realizada desde la primera operación de cada activo, en % de su propia cuenta simulada (${accounts})`;
   // category totals: realized return on the combined accounts, and the most recent exit
   const start = assets.reduce((s, a) => s + a.start_equity, 0);
   const realized = assets.reduce((s, a) => s + a.paper.equity, 0) - start;
@@ -633,9 +677,9 @@ function renderReturns(kind) {
     return box;
   };
   document.getElementById(kind + "-kpis").replaceChildren(
-    kpi("Historical return", start ? (realized / start) * 100 : 0, `${signedUsd(realized)} on ${usd(start, 0)} · ${assets.reduce((s, a) => s + a.trades.length, 0)} closed trades`),
-    kpi("Last trade", last ? last.t.pnl_pct * 100 : null,
-      last ? `${last.a.asset.split("/")[0]} · ${signedUsd(last.t.pnl)} · ${dateTimeFmt(Date.parse(last.t.closed_at))}` : "No closed trades yet"),
+    kpi("Rentabilidad histórica", start ? (realized / start) * 100 : 0, `${signedUsd(realized)} sobre ${usd(start, 0)} · ${assets.reduce((s, a) => s + a.trades.length, 0)} operaciones cerradas`),
+    kpi("Última operación", last ? last.t.pnl_pct * 100 : null,
+      last ? `${last.a.asset.split("/")[0]} · ${signedUsd(last.t.pnl)} · ${dateTimeFmt(Date.parse(last.t.closed_at))}` : "Aún sin operaciones cerradas"),
   );
   const legend = document.getElementById(kind + "-legend");
   legend.replaceChildren(...series.map((s, i) => {
@@ -646,24 +690,24 @@ function renderReturns(kind) {
     if (t) {
       const hist = (a.paper.equity / a.start_equity - 1) * 100;
       const perf = el("span", { class: "perf" });
-      perf.append(el("span", { class: signCls(hist) }, pct(hist)), document.createTextNode(" · last "),
+      perf.append(el("span", { class: signCls(hist) }, pct(hist)), document.createTextNode(" · última "),
         el("span", { class: signCls(t.pnl_pct) }, pct(t.pnl_pct * 100)));
       item.append(perf);
     } else {
-      item.append(document.createTextNode(" · no trades yet"));
+      item.append(document.createTextNode(" · sin operaciones"));
     }
     return item;
   }));
   lineChart(document.getElementById(kind + "-chart"), {
     series, step: true, xMax: Date.now(), height: 240, endLabels: true,
-    label: `Realized return by asset, ${kind === "crypto" ? "crypto" : "ETFs"}`,
+    label: `Rentabilidad realizada por activo, ${kind === "crypto" ? "criptos" : "ETFs"}`,
     yFmt: (v, step) => pct(v, Math.max(2, decimalsFor(step))),
-    emptyText: "No closed trades yet — the chart starts at the first exit.",
+    emptyText: "Aún sin operaciones cerradas: el gráfico empieza con la primera salida.",
   });
   const rows = assets.flatMap((a) => a.trades.map((t) => [a.asset, dateTimeFmt(Date.parse(t.closed_at)),
     { text: pct(t.pnl_pct * 100, 3), cls: t.pnl >= 0 ? "up" : "down" }, usd(t.equity_after), pct((t.equity_after / a.start_equity - 1) * 100, 3)]))
     .sort((a, b) => (a[1] < b[1] ? 1 : -1));
-  table(document.getElementById(kind + "-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
+  table(document.getElementById(kind + "-table"), ["Activo", "Cierre", "P&L de la operación", "Capital después", "Rentabilidad acumulada"], rows);
 }
 
 // ---------- open-position performance ----------
@@ -693,9 +737,9 @@ function renderPerformance() {
     return box;
   };
   document.getElementById("perf-kpis").replaceChildren(
-    kpi("Unrealized P&L", signedUsd(total), dir(total), `${open.length} open position${open.length === 1 ? "" : "s"}`),
-    kpi("Return on cost", cost ? pct((total / cost) * 100, 3) : "—", dir(total), `on ${usd(cost, 0)} invested`),
-    kpi("In profit", `${winners} of ${open.length}`, "", rows.length ? `best ${rows[0].name} ${pct(rows[0].pct)} · worst ${rows[rows.length - 1].name} ${pct(rows[rows.length - 1].pct)}` : "—"),
+    kpi("P&L no realizado", signedUsd(total), dir(total), `${open.length} posici${open.length === 1 ? "ón abierta" : "ones abiertas"}`),
+    kpi("Rentabilidad sobre coste", cost ? pct((total / cost) * 100, 3) : "—", dir(total), `sobre ${usd(cost, 0)} invertidos`),
+    kpi("En ganancia", `${winners} de ${open.length}`, "", rows.length ? `mejor ${rows[0].name} ${pct(rows[0].pct)} · peor ${rows[rows.length - 1].name} ${pct(rows[rows.length - 1].pct)}` : "—"),
   );
 
   // total unrealized over time: every candle timestamp of any open asset, each position from its entry
@@ -714,11 +758,11 @@ function renderPerformance() {
     if (any) points.push([t, sum]);
   }
   lineChart(document.getElementById("perf-chart"), {
-    series: [{ name: "Unrealized P&L", color: css("--series-1"), points }],
-    height: 220, label: "Total unrealized P&L of open positions",
-    refs: [{ y: 0, label: "break-even", color: css("--baseline"), dashed: true }],
+    series: [{ name: "P&L no realizado", color: css("--series-1"), points }],
+    height: 220, label: "P&L no realizado total de las posiciones abiertas",
+    refs: [{ y: 0, label: "punto de equilibrio", color: css("--baseline"), dashed: true }],
     yFmt: (v) => signedUsd(v), tooltipFmt: (v) => signedUsd(v),
-    emptyText: open.length ? "Waiting for live prices…" : "No open positions.",
+    emptyText: open.length ? "Esperando precios en vivo…" : "Sin posiciones abiertas.",
   });
   barChart(document.getElementById("perf-bars"), rows);
 }
@@ -726,13 +770,13 @@ function renderPerformance() {
 // Horizontal diverging bars, one per position; color carries the sign, the label carries the value.
 function barChart(host, rows) {
   host.replaceChildren();
-  if (!rows.length) { host.append(el("div", { class: "empty" }, "No open positions.")); return; }
+  if (!rows.length) { host.append(el("div", { class: "empty" }, "Sin posiciones abiertas.")); return; }
   const W = Math.max(260, host.clientWidth), rowH = 26, m = { l: 56, r: 64, t: 6, b: 22 };
   const H = m.t + m.b + rows.length * rowH, iw = W - m.l - m.r;
   const lo = Math.min(0, ...rows.map((r) => r.pct)), hi = Math.max(0, ...rows.map((r) => r.pct));
   const span = hi - lo || 1, pad = span * 0.05;
   const X = (v) => m.l + ((v - (lo - pad)) / (span + 2 * pad)) * iw;
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Unrealized return by open position" });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Rentabilidad no realizada por posición abierta" });
   const zero = X(0);
   const tip = el("div", { class: "tooltip", role: "status" });
   rows.forEach((r, i) => {
@@ -749,7 +793,7 @@ function barChart(host, rows) {
     const hit = svg("rect", { x: 0, y, width: W, height: rowH, fill: "transparent" });
     hit.addEventListener("pointerenter", () => {
       tip.replaceChildren(el("div", { class: "t" }, r.asset));
-      for (const [k, v] of [["Unrealized", `${signedUsd(r.u)} (${pct(r.pct)})`], ["Entry", priceFmt(r.pos.entry_price)], ["Now", r.last != null ? priceFmt(r.last) : "—"]]) {
+      for (const [k, v] of [["No realizado", `${signedUsd(r.u)} (${pct(r.pct)})`], ["Entrada", priceFmt(r.pos.entry_price)], ["Ahora", r.last != null ? priceFmt(r.last) : "—"]]) {
         const row = el("div", { class: "row" }); row.append(el("span", {}, k), el("strong", {}, v)); tip.append(row);
       }
       tip.style.display = "block";
@@ -764,13 +808,105 @@ function barChart(host, rows) {
   host.append(root, tip);
 }
 
+// ---------- strategy settings ----------
+// Mirrors reflect.py TUNABLE bounds; the worker validates again.
+const SETTINGS = [
+  { key: "entry.threshold", label: "RSI de entrada", min: 5, max: 95, step: 1, hint: "long: compra por debajo · short: vende por encima" },
+  { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1 },
+  { key: "take_profit_r", label: "Objetivo (× stop)", min: 0.5, max: 10, step: 0.1, fallback: 2.0 },
+  { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05 },
+];
+const drafts = {};  // asset -> {key: value} not saved yet; survives the periodic re-render
+
+const getPath = (o, k) => k.split(".").reduce((x, p) => (x == null ? x : x[p]), o);
+
+function renderSettings() {
+  const host = document.getElementById("settings-table");
+  if (host.contains(document.activeElement) && document.activeElement.tagName !== "BUTTON") return;  // don't yank the field being typed in
+  const t = el("table"), head = el("tr");
+  for (const h of ["Activo", "Ver.", "Dirección", ...SETTINGS.map((f) => f.label), "Tamaño de posición", ""]) head.append(el("th", {}, h));
+  t.append(el("thead")); t.firstChild.append(head);
+  const body = el("tbody");
+  for (const a of state.assets) {
+    if (!a.strategy) continue;
+    const saved = {
+      "entry.direction": a.strategy.entry.direction,
+      ...Object.fromEntries(SETTINGS.map((f) => [f.key, getPath(a.strategy, f.key) ?? f.fallback])),
+    };
+    const draft = drafts[a.asset] || (drafts[a.asset] = {});
+    const value = (k) => (k in draft ? draft[k] : saved[k]);
+    const tr = el("tr");
+    tr.append(el("td", {}, a.asset), el("td", { class: "muted" }, "v" + a.strategy.version));
+    const derived = el("td", { class: "derived" });
+    const save = el("button", { type: "button" }, "Guardar");
+    const refresh = () => {
+      const dirty = Object.keys(draft).filter((k) => String(draft[k]) !== String(saved[k]));
+      save.disabled = !dirty.length;
+      const frac = (Number(value("position_size_r")) / Number(value("stop_loss_pct"))) * 100;
+      derived.textContent = isFinite(frac) ? `${Math.min(100, frac).toFixed(0)}% de la cuenta` : "—";
+      derived.title = "Riesgo por operación ÷ stop loss, con tope en la cuenta entera (sin apalancamiento)";
+    };
+    const bind = (input, k) => {
+      input.addEventListener("input", () => {
+        draft[k] = input.value;
+        input.classList.toggle("dirty", String(input.value) !== String(saved[k]));
+        refresh();
+      });
+      if (k in draft && String(draft[k]) !== String(saved[k])) input.classList.add("dirty");
+    };
+    const dirCell = el("td"), dir = el("select", { "aria-label": `${a.asset} dirección` });
+    for (const d of ["long", "short"]) { const o = el("option", { value: d }, d); if (value("entry.direction") === d) o.selected = true; dir.append(o); }
+    if (a.kind === "stock") { dir.disabled = true; dir.title = "Las acciones y los ETFs solo operan en long"; }
+    bind(dir, "entry.direction"); dirCell.append(dir); tr.append(dirCell);
+    for (const f of SETTINGS) {
+      const td = el("td");
+      const input = el("input", { type: "number", min: f.min, max: f.max, step: f.step, value: value(f.key), "aria-label": `${a.asset} ${f.label}` });
+      input.title = `${f.min} – ${f.max}${f.hint ? " · " + f.hint : ""}`;
+      bind(input, f.key); td.append(input); tr.append(td);
+    }
+    tr.append(derived);
+    const act = el("td", { class: "act" });
+    save.addEventListener("click", () => saveSettings(a.asset, saved, save));
+    act.append(save); tr.append(act);
+    refresh();
+    body.append(tr);
+  }
+  t.append(body); host.replaceChildren(t);
+}
+
+async function saveSettings(asset, saved, btn) {
+  const draft = drafts[asset] || {};
+  const changes = {};
+  for (const [k, v] of Object.entries(draft)) {
+    if (String(v) === String(saved[k])) continue;
+    if (k !== "entry.direction") {
+      const f = SETTINGS.find((x) => x.key === k), n = Number(v);
+      if (v === "" || !isFinite(n) || n < f.min || n > f.max) { showResult("settings-result", `${asset}: ${f.label} debe estar entre ${f.min} y ${f.max}.`, true); return; }
+      changes[k] = n;
+    } else changes[k] = v;
+  }
+  btn.disabled = true; btn.textContent = "Guardando…";
+  showResult("settings-result", `Guardando ${asset}…`);
+  try {
+    const r = await postJSON("/api/strategy", { asset, changes });
+    delete drafts[asset];
+    showResult("settings-result", `${asset}: ${r.message}`);
+    watchSync();
+  } catch (e) {
+    showResult("settings-result", `${asset}: ${e.message}`, true);
+    btn.disabled = false;
+  } finally {
+    btn.textContent = "Guardar";
+  }
+}
+
 function renderPositions() {
   const host = document.getElementById("positions-table");
   const open = state.assets.filter((a) => a.paper.position);
   document.getElementById("stock-equity").textContent = usd(state.goal.stock_equity_per_asset || 500, 0);
-  if (!open.length) { host.replaceChildren(el("div", { class: "empty muted" }, "No open positions.")); return; }
+  if (!open.length) { host.replaceChildren(el("div", { class: "empty muted" }, "Sin posiciones abiertas.")); return; }
   const t = el("table"), head = el("tr");
-  for (const h of ["Asset", "Entry", "Now", "Qty", "Value", "Unrealized", ""]) head.append(el("th", {}, h));
+  for (const h of ["Activo", "Entrada", "Ahora", "Cantidad", "Valor", "No realizado", ""]) head.append(el("th", {}, h));
   t.append(el("thead")); t.firstChild.append(head);
   const body = el("tbody");
   for (const a of open) {
@@ -782,8 +918,8 @@ function renderPositions() {
       el("td", { class: u > 0 ? "up" : u < 0 ? "down" : "" }, signedUsd(u)));
     const cell = el("td", { class: "act" });
     const closed = a.kind === "stock" && a.tick && a.tick.market === "closed";
-    const btn = el("button", { type: "button", class: "danger" }, "Sell");
-    if (closed) { btn.disabled = true; btn.title = "Market closed — ETFs sell during market hours"; }
+    const btn = el("button", { type: "button", class: "danger" }, "Vender");
+    if (closed) { btn.disabled = true; btn.title = "Mercado cerrado: los ETFs se venden en horario de mercado"; }
     btn.addEventListener("click", () => sell(a.asset, btn));
     cell.append(btn); tr.append(cell); body.append(tr);
   }
@@ -804,16 +940,16 @@ async function postJSON(url, body) {
 }
 
 async function sell(asset, btn) {
-  if (!confirm(`Sell the open ${asset} position at market and return the proceeds to its paper account?`)) return;
-  btn.disabled = true; btn.textContent = "Selling…";
-  showResult("sell-result", `Selling ${asset}…`);
+  if (!confirm(`¿Vender a mercado la posición abierta de ${asset} y devolver el dinero a su cuenta simulada?`)) return;
+  btn.disabled = true; btn.textContent = "Vendiendo…";
+  showResult("sell-result", `Vendiendo ${asset}…`);
   try {
     const r = await postJSON("/api/sell", { asset });
     showResult("sell-result", `${asset}: ${r.message}`);
     watchSync();
   } catch (e) {
     showResult("sell-result", `${asset}: ${e.message}`, true);
-    btn.disabled = false; btn.textContent = "Sell";
+    btn.disabled = false; btn.textContent = "Vender";
   }
 }
 
@@ -824,8 +960,8 @@ document.getElementById("add-form").addEventListener("submit", async (ev) => {
   const buy = document.getElementById("add-buy").checked;
   if (!symbol) return;
   const btn = document.getElementById("add-btn");
-  btn.disabled = true; btn.textContent = "Adding…";
-  showResult("add-result", `Checking ${symbol.toUpperCase()} and adding it…`);
+  btn.disabled = true; btn.textContent = "Añadiendo…";
+  showResult("add-result", `Comprobando ${symbol.toUpperCase()} y añadiéndolo…`);
   try {
     const r = await postJSON("/api/add", { kind, symbol, buy });
     showResult("add-result", r.message.replace(/^./, (x) => x.toUpperCase()));
@@ -834,7 +970,7 @@ document.getElementById("add-form").addEventListener("submit", async (ev) => {
   } catch (e) {
     showResult("add-result", e.message, true);
   } finally {
-    btn.disabled = false; btn.textContent = "Add asset";
+    btn.disabled = false; btn.textContent = "Añadir activo";
   }
 });
 
@@ -858,12 +994,12 @@ function renderCards() {
     if (thr != null) { const tk = el("span", { class: "tick" }); tk.style.left = `calc(${thr}% - 1px)`; meter.append(tk); }
     const pos = a.paper.position;
     const posLine = pos
-      ? `Open ${pos.direction} from ${priceFmt(pos.entry_price)} · ${signedUsd(unrealized(a))}`
-      : (tick.decision ? tick.decision.replace(/^./, (x) => x.toUpperCase()) : "No data yet");
+      ? `${pos.direction} abierto desde ${priceFmt(pos.entry_price)} · ${signedUsd(unrealized(a))}`
+      : (tick.decision ? decisionEs(tick.decision) : "Aún sin datos");
     card.append(top, el("span", { class: "price" }, priceFmt(last)), spark,
-      el("span", { class: "line" }, `RSI ${rsiNow != null ? rsiNow.toFixed(1) : "—"} · entry ${a.strategy && a.strategy.entry.direction === "short" ? ">" : "<"} ${thr ?? "—"}`),
+      el("span", { class: "line" }, `RSI ${rsiNow != null ? rsiNow.toFixed(1) : "—"} · entrada ${a.strategy && a.strategy.entry.direction === "short" ? ">" : "<"} ${thr ?? "—"}`),
       meter, el("span", { class: "line" }, posLine),
-      el("span", { class: "line" }, `${a.trades.length} closed · ${usd(a.paper.equity)}`));
+      el("span", { class: "line" }, `${a.trades.length} cerradas · ${usd(a.paper.equity)}`));
     card.addEventListener("click", () => { selected = a.asset; render(); });
     host.append(card);
     if (c) sparkline(spark, c.close, color);
@@ -874,65 +1010,65 @@ function renderDetail() {
   const a = state.assets.find((x) => x.asset === selected);
   if (!a) return;
   const color = colorFor(a.asset), c = candles[a.asset], strat = a.strategy;
-  document.getElementById("price-title").textContent = `${a.asset} price`;
-  document.getElementById("price-sub").textContent = c ? `Last 180 one-minute closes · ${a.kind === "stock" ? "regular hours only, " : ""}live from ${c.source}` : "Loading live candles…";
+  document.getElementById("price-title").textContent = `Precio de ${a.asset}`;
+  document.getElementById("price-sub").textContent = c ? `Últimos 180 cierres de 1 minuto · ${a.kind === "stock" ? "solo horario regular, " : ""}en vivo desde ${c.source}` : "Cargando velas en vivo…";
 
   const refs = [], marks = [];
   const pos = a.paper.position;
   if (pos) {
-    refs.push({ y: pos.entry_price, label: `Entry ${priceFmt(pos.entry_price)}`, color: css("--text-secondary"), dashed: false });
+    refs.push({ y: pos.entry_price, label: `Entrada ${priceFmt(pos.entry_price)}`, color: css("--text-secondary"), dashed: false });
     refs.push({ y: pos.stop, label: `Stop ${priceFmt(pos.stop)}`, color: css("--critical"), dashed: true });
-    refs.push({ y: pos.target, label: `Target ${priceFmt(pos.target)}`, color: css("--good"), dashed: true });
-    marks.push({ x: Date.parse(pos.opened_at), y: pos.entry_price, shape: "entry", label: `Entry ${priceFmt(pos.entry_price)}` });
+    refs.push({ y: pos.target, label: `Objetivo ${priceFmt(pos.target)}`, color: css("--good"), dashed: true });
+    marks.push({ x: Date.parse(pos.opened_at), y: pos.entry_price, shape: "entry", label: `Entrada ${priceFmt(pos.entry_price)}` });
   }
   for (const t of a.trades) {
-    marks.push({ x: Date.parse(t.opened_at), y: t.entry_price, shape: "entry", label: `Entry ${priceFmt(t.entry_price)}` });
-    marks.push({ x: Date.parse(t.closed_at), y: t.exit_price, shape: "exit", label: `Exit ${priceFmt(t.exit_price)} (${t.exit_reason})` });
+    marks.push({ x: Date.parse(t.opened_at), y: t.entry_price, shape: "entry", label: `Entrada ${priceFmt(t.entry_price)}` });
+    marks.push({ x: Date.parse(t.closed_at), y: t.exit_price, shape: "exit", label: `Salida ${priceFmt(t.exit_price)} (${reasonEs(t.exit_reason)})` });
   }
   const priceSeries = c ? [{ name: a.asset, color, points: c.t.map((t, i) => [t, c.close[i]]) }] : [{ name: a.asset, color, points: [] }];
   const x0 = c ? c.t[0] : 0, x1 = c ? c.t[c.t.length - 1] : 0;
   lineChart(document.getElementById("price-chart"), {
-    series: priceSeries, height: 240, label: `${a.asset} price`, refs, tooltipFmt: priceFmt,
-    marks: marks.filter((k) => k.x >= x0 && k.x <= x1), emptyText: "Loading live candles…",
+    series: priceSeries, height: 240, label: `Precio de ${a.asset}`, refs, tooltipFmt: priceFmt,
+    marks: marks.filter((k) => k.x >= x0 && k.x <= x1), emptyText: "Cargando velas en vivo…",
   });
   if (c) {
     const rows = c.t.slice(-30).map((t, i, arr) => {
       const j = c.t.length - arr.length + i;
       return [timeFmt(t), priceFmt(c.close[j]), c.rsi[j] != null ? c.rsi[j].toFixed(1) : "—"];
     }).reverse();
-    table(document.getElementById("price-table"), ["Time", "Close", "RSI"], rows);
+    table(document.getElementById("price-table"), ["Hora", "Cierre", "RSI"], rows);
   }
 
   const dirLong = !strat || strat.entry.direction === "long";
   const rsiRefs = strat ? [
-    { y: strat.entry.threshold, label: `Entry ${dirLong ? "<" : ">"} ${strat.entry.threshold}`, color: css("--text-secondary"), dashed: true },
-    { y: dirLong ? 70 : 30, label: `Exit ${dirLong ? ">" : "<"} ${dirLong ? 70 : 30}`, color: css("--text-muted"), dashed: true },
+    { y: strat.entry.threshold, label: `Entrada ${dirLong ? "<" : ">"} ${strat.entry.threshold}`, color: css("--text-secondary"), dashed: true },
+    { y: dirLong ? 70 : 30, label: `Salida ${dirLong ? ">" : "<"} ${dirLong ? 70 : 30}`, color: css("--text-muted"), dashed: true },
   ] : [];
   document.getElementById("rsi-sub").textContent = strat
-    ? `Opens a ${strat.entry.direction} when RSI ${dirLong ? "drops below" : "rises above"} ${strat.entry.threshold}; exits at ${dirLong ? 70 : 30}, the stop or the target`
+    ? `Abre un ${strat.entry.direction} cuando el RSI ${dirLong ? "baja de" : "sube de"} ${strat.entry.threshold}; sale en ${dirLong ? 70 : 30}, en el stop o en el objetivo`
     : "";
   lineChart(document.getElementById("rsi-chart"), {
     series: c ? [{ name: "RSI", color, points: c.t.map((t, i) => [t, c.rsi[i]]).filter((p) => p[1] != null) }] : [{ name: "RSI", color, points: [] }],
     height: 170, yDomain: [0, 100], refs: rsiRefs, label: `${a.asset} RSI`, yFmt: (v) => v.toFixed(0),
-    tooltipFmt: (v) => v.toFixed(1), emptyText: "Loading live candles…",
+    tooltipFmt: (v) => v.toFixed(1), emptyText: "Cargando velas en vivo…",
   });
 
-  table(document.getElementById("trades-table"), ["Opened", "Closed", "Side", "Entry", "Exit", "Reason", "P&L"],
+  table(document.getElementById("trades-table"), ["Apertura", "Cierre", "Lado", "Entrada", "Salida", "Motivo", "P&L"],
     a.trades.slice().reverse().map((t) => [dateTimeFmt(Date.parse(t.opened_at)), dateTimeFmt(Date.parse(t.closed_at)), t.direction,
-      priceFmt(t.entry_price), priceFmt(t.exit_price), t.exit_reason.replace("_", " "),
+      priceFmt(t.entry_price), priceFmt(t.exit_price), reasonEs(t.exit_reason),
       { text: `${signedUsd(t.pnl)} (${pct(t.pnl_pct * 100, 3)})`, cls: t.pnl >= 0 ? "up" : "down" }]));
 
-  document.getElementById("strategy-title").textContent = strat ? `Strategy v${strat.version}` : "Strategy";
-  document.getElementById("strategy-sub").textContent = `${a.asset} · score ${a.score.toFixed(3)} on a −1 to +1 scale`;
+  document.getElementById("strategy-title").textContent = strat ? `Estrategia v${strat.version}` : "Estrategia";
+  document.getElementById("strategy-sub").textContent = `${a.asset} · puntuación ${a.score.toFixed(3)} en una escala de −1 a +1`;
   const params = document.getElementById("params");
   params.replaceChildren();
   if (strat) {
     const rows = [
-      ["Indicator", strat.entry.indicator.toUpperCase()], ["Direction", strat.entry.direction],
-      ["Entry threshold", strat.entry.threshold], ["Stop loss", strat.stop_loss_pct + "%"],
-      ["Risk per trade", strat.position_size_r + "% of equity"], ["Take profit", (strat.take_profit_r ?? 2) + "× stop distance"],
-      ["Realized return", pct(a.metrics.realised_return * 100, 3)], ["Max drawdown", (a.metrics.max_drawdown * 100).toFixed(2) + "%"],
-      ["Sharpe", a.metrics.n >= 2 ? a.metrics.sharpe.toFixed(2) : "needs 2+ trades"],
+      ["Indicador", strat.entry.indicator.toUpperCase()], ["Dirección", strat.entry.direction],
+      ["Umbral de entrada", strat.entry.threshold], ["Stop loss", strat.stop_loss_pct + "%"],
+      ["Riesgo por operación", strat.position_size_r + "% del capital"], ["Objetivo", (strat.take_profit_r ?? 2) + "× distancia del stop"],
+      ["Rentabilidad realizada", pct(a.metrics.realised_return * 100, 3)], ["Máx. drawdown", (a.metrics.max_drawdown * 100).toFixed(2) + "%"],
+      ["Sharpe", a.metrics.n >= 2 ? a.metrics.sharpe.toFixed(2) : "requiere 2+ operaciones"],
     ];
     for (const [k, v] of rows) params.append(el("dt", {}, k), el("dd", {}, String(v)));
   }
@@ -940,24 +1076,24 @@ function renderDetail() {
   hist.replaceChildren();
   if (!a.hypotheses.length) {
     const left = Math.max(0, state.goal.reflection_every - a.trades.length);
-    hist.append(el("li", {}, left ? `No changes yet — first reflection after ${left} more closed trade${left > 1 ? "s" : ""}.` : "No changes yet — due at the next reflection."));
+    hist.append(el("li", {}, left ? `Aún sin cambios: primera reflexión tras ${left} operaci${left > 1 ? "ones cerradas" : "ón cerrada"} más.` : "Aún sin cambios: toca en la próxima reflexión."));
   }
   for (const h of a.hypotheses.slice().reverse()) {
     const li = el("li");
-    li.append(el("div", { class: "what" }, `v${h.from_version} → v${h.to_version} · ${h.variable} ${h.old_value} → ${h.new_value}${h.clamped ? ` (asked ${h.requested_value}, capped)` : ""}`),
-      el("div", { class: "muted" }, `${h.mode === "hermes" ? "Hermes" : "Fallback rule"} · ${dateTimeFmt(Date.parse(h.ts))}`),
+    li.append(el("div", { class: "what" }, `v${h.from_version} → v${h.to_version} · ${h.variable} ${h.old_value} → ${h.new_value}${h.clamped ? ` (pedido ${h.requested_value}, limitado)` : ""}`),
+      el("div", { class: "muted" }, `${{ hermes: "Hermes", manual: "Manual (dashboard)" }[h.mode] || "Regla de respaldo"} · ${dateTimeFmt(Date.parse(h.ts))}`),
       el("div", { class: "why" }, h.rationale || ""));
     hist.append(li);
   }
   document.getElementById("footer").textContent =
-    `Paper trading only · crypto fills simulated, stock fills from the Alpaca paper account · positions and trades from the Railway volume (synced ${ago(state.pulled_at)}) · prices live from the exchange, refreshed every minute`;
+    `Solo trading simulado · ejecuciones de cripto simuladas, las de acciones en la cuenta paper de Alpaca · posiciones y operaciones del worker de Railway (sincronizado ${ago(state.pulled_at)}) · precios en vivo del exchange, actualizados cada minuto`;
 }
 
 function render() {
   if (!state || !state.ready) return;
   if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];
   document.getElementById("content").hidden = false;
-  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderPerformance(); renderPositions(); renderCards(); renderDetail();
+  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderPerformance(); renderPositions(); renderSettings(); renderCards(); renderDetail();
   document.getElementById("crypto-table").hidden = !tableOpen.crypto;
   document.getElementById("stock-table").hidden = !tableOpen.stock;
   document.getElementById("price-table").hidden = !tableOpen.price;
@@ -971,16 +1107,16 @@ async function loadState() {
     if (!r.ok) throw new Error(s.error || r.statusText);
     if (!s.ready) {
       const b = document.getElementById("banner");
-      b.textContent = s.sync && s.sync.error ? "Sync failed: " + s.sync.error : "Pulling state from Railway… the first sync takes a minute or two.";
+      b.textContent = s.sync && s.sync.error ? "Falló la sincronización: " + s.sync.error : "Descargando el estado desde Railway…";
       b.classList.add("show");
-      document.getElementById("synced").textContent = "Syncing from Railway…";
+      document.getElementById("synced").textContent = "Sincronizando con Railway…";
       return s;
     }
     state = s; render();
     return s;
   } catch (e) {
     const b = document.getElementById("banner");
-    b.textContent = "Couldn't read dashboard data (" + e.message + ") — showing the last loaded view.";
+    b.textContent = "No se pudieron leer los datos del dashboard (" + e.message + "); se muestra la última vista cargada.";
     b.classList.add("show");
     return null;
   }
@@ -1006,13 +1142,13 @@ async function watchSync() {
 }
 document.getElementById("sync-btn").addEventListener("click", async () => {
   document.getElementById("sync-btn").disabled = true;
-  document.getElementById("synced").textContent = "Syncing from Railway…";
+  document.getElementById("synced").textContent = "Sincronizando con Railway…";
   await fetch("/api/sync", { method: "POST" });
   watchSync();
 });
 document.querySelectorAll("[data-table]").forEach((b) => b.addEventListener("click", () => {
   const k = b.dataset.table; tableOpen[k] = !tableOpen[k];
-  b.textContent = tableOpen[k] ? "Chart only" : "Table"; render();
+  b.textContent = tableOpen[k] ? "Solo gráfico" : "Tabla"; render();
 }));
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });

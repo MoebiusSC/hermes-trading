@@ -104,10 +104,10 @@ def normalize_asset(raw: str, kind: str) -> str:
     if kind == "crypto":
         symbol = symbol if "/" in symbol else f"{symbol}/USDT"
         if not all(part.isalnum() for part in symbol.split("/")) or symbol.count("/") != 1:
-            raise ValueError(f"{raw!r} doesn't look like a crypto symbol")
+            raise ValueError(f"{raw!r} no parece un símbolo de cripto")
         return symbol
     if not symbol.isalnum() or len(symbol) > 6:
-        raise ValueError(f"{raw!r} doesn't look like a stock/ETF ticker")
+        raise ValueError(f"{raw!r} no parece un ticker de acción o ETF")
     return symbol
 
 

@@ -5,6 +5,7 @@
 
   POST /sell    {"asset": "BTC/USDT"}                  close that asset's position now
   POST /add     {"asset": "ADA/USDT", "buy": true}     start trading an asset (optionally buy now)
+  POST /strategy {"asset": "BTC/USDT", "changes": {"stop_loss_pct": 1.5}}   edit its strategy
                 Both reply {"message": "..."} or {"error": "..."}; same bearer token.
 
 /state lists every state file, sending only what the caller is missing:
@@ -39,10 +40,15 @@ def attach(worker) -> None:
 def _run_action(path: str, body: dict) -> str:
     worker = _worker
     if worker is None or worker.loop is None:
-        raise RuntimeError("worker is still starting")
+        raise RuntimeError("el worker aún está arrancando")
     asset = str(body.get("asset") or "")
     if path == "/sell":
         coro = worker.book(asset).manual_sell()
+    elif path == "/strategy":
+        changes = body.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("no hay cambios que guardar")
+        coro = worker.book(asset).set_strategy(changes)
     else:
         coro = worker.add_asset(asset, bool(body.get("buy")))
     return asyncio.run_coroutine_threadsafe(coro, worker.loop).result(timeout=ACTION_TIMEOUT_S)
@@ -97,7 +103,7 @@ def _handler(token: str):
                 self._send(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path not in ("/state", "/sell", "/add"):
+            if self.path not in ("/state", "/sell", "/add", "/strategy"):
                 return self._send(404, {"error": "not found"})
             sent = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
             if not hmac.compare_digest(sent.encode(), token.encode()):

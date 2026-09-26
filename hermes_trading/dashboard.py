@@ -126,12 +126,12 @@ def build_state() -> dict:
 def worker_action(path: str, body: dict) -> tuple[int, dict]:
     url, token = config.env("HERMES_STATE_URL"), config.env("HERMES_STATE_TOKEN")
     if not url or not token:
-        return 503, {"error": "HERMES_STATE_URL / HERMES_STATE_TOKEN are not set in .env"}
+        return 503, {"error": "faltan HERMES_STATE_URL / HERMES_STATE_TOKEN en .env"}
     try:
         r = httpx.post(url.rstrip("/") + path, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=100)
         payload = r.json()
     except (httpx.HTTPError, ValueError) as e:
-        return 502, {"error": f"worker unreachable: {type(e).__name__}: {e}"[:300]}
+        return 502, {"error": f"no se pudo contactar con el worker: {type(e).__name__}: {e}"[:300]}
     if r.status_code == 200:
         SYNC.start()  # show the result without waiting for the next auto-sync
     return r.status_code, payload
@@ -286,14 +286,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             SYNC.start()
             return self._json(SYNC.status())
-        if path in ("/api/sell", "/api/add"):
+        if path in ("/api/sell", "/api/add", "/api/strategy"):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 body = json.loads(self.rfile.read(length) or b"{}")
             except ValueError:
-                return self._json({"error": "invalid JSON"}, 400)
+                return self._json({"error": "JSON no válido"}, 400)
             if path == "/api/sell":
                 code, payload = worker_action("/sell", {"asset": str(body.get("asset") or "")})
+            elif path == "/api/strategy":
+                code, payload = worker_action("/strategy", {"asset": str(body.get("asset") or ""), "changes": body.get("changes")})
             else:
                 code, payload = add_asset(body)
             return self._json(payload, code)
