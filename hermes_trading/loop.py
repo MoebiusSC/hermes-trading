@@ -24,7 +24,7 @@ from rich.console import Console
 from . import config, reflect
 from .adapters import SchemaError, alpaca, check_schema, macro, news, onchain, price, stocks
 from .adapters.alpaca import AlpacaError
-from .storage import load_yaml, write_json
+from .storage import append_jsonl, load_yaml, write_json
 
 console = Console()
 
@@ -41,6 +41,7 @@ BREAKER_THRESHOLD = 5  # consecutive failed ticks before an adapter is benched
 BREAKER_COOLDOWN_S = 300
 TICK_S = 60
 REFLECT_EVERY_S = 1800
+SNAPSHOT_EVERY_S = 300
 START_EQUITY = config.CRYPTO_START_EQUITY  # per crypto asset
 RSI_PERIOD = 14
 RSI_EXIT = {"long": 70.0, "short": 30.0}
@@ -472,6 +473,59 @@ class Worker:
         self.books = [make_book(asset, goal) for asset in assets]
         self.loop: asyncio.AbstractEventLoop | None = None  # set in run(); the state server posts actions to it
         self.reflection: dict = {}  # last reflection cycle, reported in the heartbeat
+        self.last_prices: dict[str, float] = {}  # stocks keep their last price while the market is closed
+        self._issues: dict[str, str | None] = {}  # asset -> the issue last logged, so each is logged once
+        self._last_snapshot = float("-inf")  # first snapshot on the first tick
+        self.reflect_every_s = float(REFLECT_EVERY_S)
+
+    # --- dashboard records ---------------------------------------------------
+
+    def event(self, kind: str, text: str, asset: str | None = None, level: str = "info") -> None:
+        """One line in the activity feed. Trades and strategy changes aren't logged here: the
+        dashboard reads them from trades.jsonl and hypotheses.jsonl."""
+        try:
+            append_jsonl(config.EVENTS_FILE, {"ts": utcnow(), "kind": kind, "level": level, "asset": asset, "text": text})
+        except OSError as e:
+            console.log(f"[red]event log failed:[/] {e}")
+
+    def _log_issue(self, asset: str, s: dict) -> None:
+        decision = s.get("decision") or ""
+        if s.get("error"):
+            issue, level = s["error"], "error"
+        elif decision.startswith(("skip:", "entry rejected")) or "blocked" in decision:
+            issue, level = decision, "warn"
+        else:
+            issue, level = None, "info"
+        previous = self._issues.get(asset)
+        if issue and issue != previous:
+            self.event("issue", issue, asset, level)
+        elif not issue and previous:
+            self.event("recovered", "back to normal", asset)
+        self._issues[asset] = issue
+
+    def _snapshot(self) -> None:
+        """Capital per category every SNAPSHOT_EVERY_S, for the equity curve and drawdown."""
+        now = time.monotonic()
+        if now - self._last_snapshot < SNAPSHOT_EVERY_S:
+            return
+        self._last_snapshot = now
+        kinds = {k: {"start": 0.0, "realized": 0.0, "unrealized": 0.0, "invested": 0.0, "open": 0} for k in ("crypto", "stock")}
+        for book in self.books:
+            agg = kinds["stock" if config.is_stock(book.asset) else "crypto"]
+            pos, last = book.paper["position"], self.last_prices.get(book.asset)
+            agg["start"] += book.start_equity
+            agg["realized"] += book.paper["equity"]
+            if pos:
+                price_now = last if last is not None else pos["entry_price"]
+                sign = 1 if pos["direction"] == "long" else -1
+                agg["unrealized"] += sign * pos["qty"] * (price_now - pos["entry_price"])
+                agg["invested"] += pos["qty"] * price_now
+                agg["open"] += 1
+        record = {"ts": utcnow(), **{k: {f: round(v, 4) for f, v in agg.items()} for k, agg in kinds.items()}}
+        try:
+            append_jsonl(config.EQUITY_FILE, record)
+        except OSError as e:
+            console.log(f"[red]equity snapshot failed:[/] {e}")
 
     def book(self, asset: str) -> AssetBook:
         for book in self.books:
@@ -493,6 +547,7 @@ class Worker:
         book = make_book(asset, load_yaml(config.GOAL_FILE))
         self.books.append(book)
         message = f"{asset} añadido con una cuenta simulada de ${book.start_equity:,.0f}".replace(",", ".")
+        self.event("asset_added", message, asset)
         if buy:
             try:
                 message += "; " + await book.manual_buy()
@@ -530,18 +585,21 @@ class Worker:
                 reports[book.asset] = await self._reflect_book(book, goal, mode)
             except Exception as e:  # one asset's failure must not block the others
                 reports[book.asset] = f"FAILED — {type(e).__name__}: {e}"[:300]
+                self.event("reflect_error", f"{type(e).__name__}: {e}"[:300], book.asset, "error")
             console.log(f"[magenta]reflect[/] {book.asset}: {reports[book.asset]}")
-        self.reflection = {"ts": utcnow(), "mode": mode, "reports": reports}
+        self.reflection = {"ts": utcnow(), "mode": mode, "every_s": self.reflect_every_s, "reports": reports}
 
     async def reflect_forever(self, mode: str, every_s: float) -> None:
         console.print(f"[bold]Reflection on[/] mode={mode} every {every_s:g}s")
+        self.reflect_every_s = every_s
         while True:
             started = time.monotonic()
             try:
                 await self.reflect_once(mode)
             except Exception as e:  # e.g. goal.yaml unreadable; try again next cycle
                 console.log(f"[red]reflection cycle failed:[/] {type(e).__name__}: {e}")
-                self.reflection = {"ts": utcnow(), "mode": mode, "error": f"{type(e).__name__}: {e}"[:300]}
+                self.reflection = {"ts": utcnow(), "mode": mode, "every_s": every_s, "error": f"{type(e).__name__}: {e}"[:300]}
+                self.event("reflect_error", self.reflection["error"], None, "error")
             await asyncio.sleep(max(0.0, every_s - (time.monotonic() - started)))
 
     def _reflect_settings(self) -> tuple[str, float] | None:
@@ -561,6 +619,11 @@ class Worker:
         summaries = await asyncio.gather(*(book.tick() for book in self.books))
         by_asset = {book.asset: s for book, s in zip(self.books, summaries)}
         self._heartbeat("running", by_asset)
+        for asset, s in by_asset.items():
+            if s.get("last_price") is not None:
+                self.last_prices[asset] = s["last_price"]
+            self._log_issue(asset, s)
+        self._snapshot()
         for asset, s in by_asset.items():
             if s.get("error"):
                 console.log(f"[red]{asset} tick failed:[/] {s['error']}")

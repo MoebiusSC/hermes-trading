@@ -226,10 +226,11 @@ def _handler(token: str, password: str = ""):
             try:
                 if url.path == "/api/state":
                     return self._send(200, dashboard.build_state(config.STATE, hosted=True))
-                asset = (parse_qs(url.query).get("asset") or [""])[0]
-                if asset not in config.goal_assets(load_yaml(config.GOAL_FILE)):
-                    return self._send(404, {"error": "activo desconocido"})
-                self._send(200, dashboard.candles(asset))
+                query = parse_qs(url.query)
+                asset, tf = (query.get("asset") or [""])[0], (query.get("tf") or ["1m"])[0]
+                if asset not in config.goal_assets(load_yaml(config.GOAL_FILE)) or tf not in dashboard.TIMEFRAMES:
+                    return self._send(404, {"error": "activo o periodo desconocido"})
+                self._send(200, dashboard.candles(asset, tf))
             except Exception as e:  # e.g. an exchange outage; the page keeps its last render
                 self._send(503, {"error": f"{type(e).__name__}: {e}"[:300]})
 

@@ -37,6 +37,15 @@ SYNC_EVERY_FAST_S = 60   # with the state server: one small request
 SYNC_EVERY_CLI_S = 300   # Railway CLI fallback: ~40s per pull
 CANDLES = 180  # 3 hours of 1-minute candles
 CANDLE_TTL_S = 30
+# price chart timeframes: ccxt timeframe, bars, Alpaca timeframe, days of history to ask Alpaca for
+TIMEFRAMES = {
+    "1m": ("1m", CANDLES, "1Min", 5),
+    "5m": ("5m", 288, "5Min", 10),
+    "1h": ("1h", 168, "1Hour", 40),
+    "1d": ("1d", 180, "1Day", 400),
+}
+EQUITY_POINTS = 1500  # the equity curve is downsampled to about this many snapshots
+EVENTS_SHOWN = 300
 FALLBACK_EXCHANGES = ("binance", "kraken", "okx")
 
 
@@ -88,6 +97,37 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def evaluate_changes(trades: list[dict], hypotheses: list[dict], goal: dict) -> list[dict]:
+    """Did each strategy change help? Compares the score of the `reflection_every` trades closed
+    before it with the ones opened under it (until the next change). Small samples: a hint only."""
+    n = int(goal["reflection_every"])
+    out = []
+    for h in hypotheses:
+        end = next((x["ts"] for x in hypotheses if x["ts"] > h["ts"]), None)
+        before = [t for t in trades if t["closed_at"] <= h["ts"]][-n:]
+        after = [t for t in trades if t["opened_at"] >= h["ts"] and (end is None or t["opened_at"] < end)][:n]
+        ev: dict = {"n_before": len(before), "n_after": len(after), "needed": n}
+        if before and (len(after) >= n or (end is not None and len(after) >= 2)):
+            sb, sa = score(before, goal), score(after, goal)
+            ev.update(status="done", score_before=sb, score_after=sa, improved=sa > sb,
+                      avg_before=sum(float(t["pnl_pct"]) for t in before) / len(before),
+                      avg_after=sum(float(t["pnl_pct"]) for t in after) / len(after))
+            if h.get("predicted_direction") in ("up", "down"):
+                ev["matched"] = (sa > sb) == (h["predicted_direction"] == "up")
+        else:
+            ev["status"] = "pending" if end is None else "insufficient"
+        out.append({**h, "evaluation": ev})
+    return out
+
+
+def _equity_curve(path: Path) -> list[dict]:
+    points = read_jsonl(path)
+    if len(points) > EQUITY_POINTS:
+        step = len(points) / EQUITY_POINTS
+        points = [points[int(i * step)] for i in range(EQUITY_POINTS)] + [points[-1]]
+    return points
+
+
 def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
     """The page's data. `hosted`: read the worker's live state (on Railway), so there's no sync."""
     sync = {"running": False, "error": None} if hosted else SYNC.status()
@@ -113,7 +153,7 @@ def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
                 "strategy": load_yaml(root / "strategy.yaml") if (root / "strategy.yaml").exists() else None,
                 "paper": _read_json(root / "paper_account.json") or {"equity": start, "position": None},
                 "trades": trades,
-                "hypotheses": read_jsonl(root / "hypotheses.jsonl"),
+                "hypotheses": evaluate_changes(trades, read_jsonl(root / "hypotheses.jsonl"), goal),
                 "metrics": metrics(trades),
                 "score": score(trades, goal),
                 "tick": (heartbeat.get("assets") or {}).get(asset),
@@ -125,6 +165,8 @@ def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
         "worker": {k: v for k, v in heartbeat.items() if k != "assets"},
         "pulled_at": pulled_at,
         "assets": assets,
+        "equity": _equity_curve(state_dir / "equity.jsonl"),
+        "events": read_jsonl(state_dir / "events.jsonl")[-EVENTS_SHOWN:],
         "sync": sync,
         "hosted": hosted,
     }
@@ -183,17 +225,18 @@ def _rsi_series(closes: list[float], period: int = RSI_PERIOD) -> list[float | N
     return out
 
 
-def _stock_candles(symbol: str) -> dict:
-    """Alpaca IEX 1-minute bars (read-only data API; the same keys the worker uses)."""
+def _stock_candles(symbol: str, tf: str = "1m") -> dict:
+    """Alpaca IEX bars (read-only data API; the same keys the worker uses)."""
+    _, bars_wanted, alpaca_tf, days = TIMEFRAMES[tf]
     key, secret = config.env("ALPACA_API_KEY"), config.env("ALPACA_API_SECRET")
     if not key or not secret:
         raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET not set in .env")
     feed = config.env("ALPACA_DATA_FEED", "iex")
-    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=5)).isoformat()
+    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     r = httpx.get(
         f"https://data.alpaca.markets/v2/stocks/{symbol}/bars",
         headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
-        params={"timeframe": "1Min", "limit": CANDLES, "feed": feed, "sort": "desc", "start": start},
+        params={"timeframe": alpaca_tf, "limit": bars_wanted, "feed": feed, "sort": "desc", "start": start},
         timeout=15,
     )
     r.raise_for_status()
@@ -201,22 +244,30 @@ def _stock_candles(symbol: str) -> dict:
     closes = [float(b["c"]) for b in bars]
     return {
         "asset": symbol,
+        "tf": tf,
         "source": f"Alpaca ({feed.upper()})",
         "t": [int(dt.datetime.fromisoformat(b["t"].replace("Z", "+00:00")).timestamp() * 1000) for b in bars],
+        "open": [float(b["o"]) for b in bars],
+        "high": [float(b["h"]) for b in bars],
+        "low": [float(b["l"]) for b in bars],
         "close": closes,
         "rsi": _rsi_series(closes),
     }
 
 
-def candles(asset: str) -> dict:
+def candles(asset: str, tf: str = "1m") -> dict:
+    if tf not in TIMEFRAMES:
+        raise ValueError(f"unknown timeframe {tf!r}")
+    key = (asset, tf)
     with _candle_lock:
-        hit = _candle_cache.get(asset)
+        hit = _candle_cache.get(key)
         if hit and time.time() - hit[0] < CANDLE_TTL_S:
             return hit[1]
         if config.is_stock(asset):
-            data = _stock_candles(asset)
-            _candle_cache[asset] = (time.time(), data)
+            data = _stock_candles(asset, tf)
+            _candle_cache[key] = (time.time(), data)
             return data
+        ccxt_tf, bars_wanted = TIMEFRAMES[tf][:2]
         primary = config.env("EXCHANGE_ID", "binance")
         order = [primary] + [e for e in FALLBACK_EXCHANGES if e != primary]
         if asset in _preferred:
@@ -226,7 +277,7 @@ def candles(asset: str) -> dict:
         for exchange_id in order:
             try:
                 client = _clients.setdefault(exchange_id, getattr(ccxt, exchange_id)({"enableRateLimit": True}))
-                rows = client.fetch_ohlcv(asset, timeframe="1m", limit=CANDLES)
+                rows = client.fetch_ohlcv(asset, timeframe=ccxt_tf, limit=bars_wanted)
             except Exception as e:
                 errors.append(f"{exchange_id}: {type(e).__name__}")
                 continue
@@ -236,12 +287,16 @@ def candles(asset: str) -> dict:
             closes = [float(r[4]) for r in rows]
             data = {
                 "asset": asset,
+                "tf": tf,
                 "source": exchange_id,
                 "t": [int(r[0]) for r in rows],
+                "open": [float(r[1]) for r in rows],
+                "high": [float(r[2]) for r in rows],
+                "low": [float(r[3]) for r in rows],
                 "close": closes,
                 "rsi": _rsi_series(closes),
             }
-            _candle_cache[asset] = (time.time(), data)
+            _candle_cache[key] = (time.time(), data)
             return data
         raise RuntimeError("no exchange returned candles — " + "; ".join(errors))
 
@@ -282,8 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/state":
                 self._json(build_state())
             elif url.path == "/api/candles":
-                asset = (parse_qs(url.query).get("asset") or [""])[0]
-                self._json(candles(asset))
+                query = parse_qs(url.query)
+                self._json(candles((query.get("asset") or [""])[0], (query.get("tf") or ["1m"])[0]))
             else:
                 self._send(404, b"not found", "text/plain")
         except Exception as e:  # e.g. reading the mirror mid-swap; the page keeps its last render

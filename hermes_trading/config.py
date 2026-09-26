@@ -4,6 +4,8 @@ State layout (the Railway volume mirrors this):
   state/goal.yaml                    shared goal + the list of assets to trade
   state/strategy.template.yaml       starting strategy for an asset seen for the first time
   state/heartbeat.json               worker liveness, one section per asset
+  state/equity.jsonl                 capital snapshot every 5 minutes (realized, unrealized, invested)
+  state/events.jsonl                 worker issues, recoveries, reflection failures, added assets
   state/assets/<BASE-QUOTE>/         per-asset: strategy.yaml, trades.jsonl, hypotheses.jsonl,
                                      paper_account.json, history/
 """
@@ -22,6 +24,8 @@ STATE_SEED = ROOT / "state_seed"
 GOAL_FILE = STATE / "goal.yaml"
 STRATEGY_TEMPLATE = STATE / "strategy.template.yaml"
 HEARTBEAT_FILE = STATE / "heartbeat.json"
+EQUITY_FILE = STATE / "equity.jsonl"  # capital snapshots for the dashboard's equity curve
+EVENTS_FILE = STATE / "events.jsonl"  # worker issues and actions for the dashboard's activity feed
 ASSETS_DIR = STATE / "assets"
 
 # Files the single-asset version kept at the state root; run.py migrates them on boot.
