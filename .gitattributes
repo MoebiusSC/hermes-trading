@@ -1,0 +1,4 @@
+# Store text with LF in the repository, whatever the OS that commits it
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
