@@ -13,3 +13,10 @@ dependencies = [
     "rich>=15.0.0",
     "yfinance>=1.7.0",
 ]
+
+[tool.setuptools]
+# explicit: the repo root also holds state/, tests/ and docs/, which are not packages
+packages = ["hermes_trading", "hermes_trading.adapters"]
+
+[tool.setuptools.package-data]
+hermes_trading = ["dashboard.html"]
