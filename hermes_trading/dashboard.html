@@ -173,6 +173,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
     <span class="spacer"></span>
     <span class="sub" id="synced">—</span>
     <button id="sync-btn" type="button">Sincronizar con Railway</button>
+    <form id="logout-form" method="post" action="/logout" hidden><button type="submit">Salir</button></form>
   </header>
   <div class="banner" id="banner" role="status"></div>
 
@@ -614,7 +615,11 @@ function renderHeader() {
   pill.children[0].textContent = icon; pill.children[0].style.color = css(color);
   pill.children[1].textContent = `${label}${w.ts ? " · último ciclo " + timeFmt(Date.parse(w.ts)) : ""}`;
   const syncing = state.sync && state.sync.running;
-  document.getElementById("synced").textContent = syncing ? "Sincronizando con Railway…" : `Datos de Railway sincronizados ${ago(state.pulled_at)}`;
+  // Served by the worker itself (state.hosted): the data is live, so there's nothing to sync
+  document.getElementById("synced").textContent = state.hosted ? "Datos en vivo del worker"
+    : syncing ? "Sincronizando con Railway…" : `Datos de Railway sincronizados ${ago(state.pulled_at)}`;
+  document.getElementById("sync-btn").hidden = !!state.hosted;
+  document.getElementById("logout-form").hidden = !state.hosted;
   document.getElementById("sync-btn").disabled = !!syncing;
   document.getElementById("content").classList.toggle("stale", !!syncing);
   const banner = document.getElementById("banner");
@@ -933,6 +938,7 @@ function showResult(id, text, isError) {
 
 async function postJSON(url, body) {
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 401) { location.href = "/"; }  // web session expired → login
   let payload = {};
   try { payload = await r.json(); } catch (_) { /* non-JSON error page */ }
   if (!r.ok) throw new Error(payload.error || r.statusText);
@@ -1086,7 +1092,7 @@ function renderDetail() {
     hist.append(li);
   }
   document.getElementById("footer").textContent =
-    `Solo trading simulado · ejecuciones de cripto simuladas, las de acciones en la cuenta paper de Alpaca · posiciones y operaciones del worker de Railway (sincronizado ${ago(state.pulled_at)}) · precios en vivo del exchange, actualizados cada minuto`;
+    `Solo trading simulado · ejecuciones de cripto simuladas, las de acciones en la cuenta paper de Alpaca · posiciones y operaciones del worker de Railway (${state.hosted ? "en vivo" : "sincronizado " + ago(state.pulled_at)}) · precios en vivo del exchange, actualizados cada minuto`;
 }
 
 function render() {
@@ -1103,6 +1109,7 @@ function render() {
 async function loadState() {
   try {
     const r = await fetch("/api/state");
+    if (r.status === 401) { location.href = "/"; return null; }  // web session expired → login
     const s = await r.json();
     if (!r.ok) throw new Error(s.error || r.statusText);
     if (!s.ready) {

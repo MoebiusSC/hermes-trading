@@ -5,6 +5,9 @@ Serves dashboard.html on http://127.0.0.1:<port> (localhost only). Data sources:
     every minute (every 5 without the worker's state server) and from the "Sync" button.
     Separate from remote_state/, which the scheduled reflection task owns.
   • live 1-minute candles from the exchange, for the price and RSI charts.
+
+The same page is also served on the internet by the Railway worker itself (state_server.py,
+behind a password), reading its state directly instead of a mirror.
 """
 from __future__ import annotations
 
@@ -85,15 +88,21 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def build_state() -> dict:
-    if not (DASH_DIR / "goal.yaml").exists():
-        return {"ready": False, "sync": SYNC.status()}
-    goal = load_yaml(DASH_DIR / "goal.yaml")
-    heartbeat = _read_json(DASH_DIR / "heartbeat.json") or {}
-    pulled = DASH_DIR / ".pulled"
+def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
+    """The page's data. `hosted`: read the worker's live state (on Railway), so there's no sync."""
+    sync = {"running": False, "error": None} if hosted else SYNC.status()
+    if not (state_dir / "goal.yaml").exists():
+        return {"ready": False, "sync": sync}
+    goal = load_yaml(state_dir / "goal.yaml")
+    heartbeat = _read_json(state_dir / "heartbeat.json") or {}
+    pulled = state_dir / ".pulled"
+    if hosted:
+        pulled_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    else:
+        pulled_at = pulled.read_text().strip() if pulled.exists() else None
     assets = []
     for asset in config.goal_assets(goal):
-        root = DASH_DIR / "assets" / config.asset_slug(asset)
+        root = state_dir / "assets" / config.asset_slug(asset)
         trades = read_jsonl(root / "trades.jsonl")
         start = config.start_equity(asset, goal)
         assets.append(
@@ -114,9 +123,10 @@ def build_state() -> dict:
         "ready": True,
         "goal": goal,
         "worker": {k: v for k, v in heartbeat.items() if k != "assets"},
-        "pulled_at": pulled.read_text().strip() if pulled.exists() else None,
+        "pulled_at": pulled_at,
         "assets": assets,
-        "sync": SYNC.status(),
+        "sync": sync,
+        "hosted": hosted,
     }
 
 
