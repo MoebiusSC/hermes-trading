@@ -201,6 +201,28 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
       </section>
     </div>
 
+    <section class="panel section">
+      <div class="chart-head">
+        <div>
+          <h2>Open positions · performance</h2>
+          <div class="sub">Unrealized P&amp;L of every position still open, marked to the live one-minute prices</div>
+        </div>
+      </div>
+      <div class="kpis" id="perf-kpis"></div>
+      <div class="actions-grid" style="margin-top:0">
+        <div>
+          <h2>Total unrealized P&amp;L over time</h2>
+          <div class="sub">Last 3 hours · each position counts from its entry</div>
+          <div class="chart" id="perf-chart"></div>
+        </div>
+        <div>
+          <h2>Histogram by position</h2>
+          <div class="sub">Unrealized return on each position's cost</div>
+          <div class="chart" id="perf-bars"></div>
+        </div>
+      </div>
+    </section>
+
     <div class="actions-grid">
       <section class="panel">
         <h2>Open positions</h2>
@@ -644,6 +666,104 @@ function renderReturns(kind) {
   table(document.getElementById(kind + "-table"), ["Asset", "Closed", "Trade P&L", "Equity after", "Return to date"], rows);
 }
 
+// ---------- open-position performance ----------
+// Close at or before t from an asset's candles (candles are sorted by time).
+function closeAt(c, t) {
+  let lo = 0, hi = c.t.length - 1, best = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (c.t[mid] <= t) { best = c.close[mid]; lo = mid + 1; } else hi = mid - 1;
+  }
+  return best;
+}
+
+function renderPerformance() {
+  const open = state.assets.filter((a) => a.paper.position);
+  const cost = open.reduce((s, a) => s + a.paper.position.qty * a.paper.position.entry_price, 0);
+  const total = open.reduce((s, a) => s + unrealized(a), 0);
+  const rows = open.map((a) => {
+    const p = a.paper.position, u = unrealized(a);
+    return { asset: a.asset, name: a.asset.split("/")[0], u, pct: (u / (p.qty * p.entry_price)) * 100, pos: p, last: lastPrice(a) };
+  }).sort((x, y) => y.pct - x.pct);
+  const winners = rows.filter((r) => r.u > 0).length;
+  const dir = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
+  const kpi = (label, value, cls, note) => {
+    const box = el("div");
+    box.append(el("div", { class: "label" }, label), el("div", { class: "value " + (cls || "") }, value), el("div", { class: "note" }, note));
+    return box;
+  };
+  document.getElementById("perf-kpis").replaceChildren(
+    kpi("Unrealized P&L", signedUsd(total), dir(total), `${open.length} open position${open.length === 1 ? "" : "s"}`),
+    kpi("Return on cost", cost ? pct((total / cost) * 100, 3) : "—", dir(total), `on ${usd(cost, 0)} invested`),
+    kpi("In profit", `${winners} of ${open.length}`, "", rows.length ? `best ${rows[0].name} ${pct(rows[0].pct)} · worst ${rows[rows.length - 1].name} ${pct(rows[rows.length - 1].pct)}` : "—"),
+  );
+
+  // total unrealized over time: every candle timestamp of any open asset, each position from its entry
+  const ts = [...new Set(open.flatMap((a) => (candles[a.asset] ? candles[a.asset].t : [])))].sort((x, y) => x - y);
+  const points = [];
+  for (const t of ts) {
+    let sum = 0, any = false;
+    for (const a of open) {
+      const p = a.paper.position, c = candles[a.asset];
+      if (!c || Date.parse(p.opened_at) > t) continue;
+      const close = closeAt(c, t);
+      if (close == null) continue;
+      sum += (p.direction === "long" ? 1 : -1) * p.qty * (close - p.entry_price);
+      any = true;
+    }
+    if (any) points.push([t, sum]);
+  }
+  lineChart(document.getElementById("perf-chart"), {
+    series: [{ name: "Unrealized P&L", color: css("--series-1"), points }],
+    height: 220, label: "Total unrealized P&L of open positions",
+    refs: [{ y: 0, label: "break-even", color: css("--baseline"), dashed: true }],
+    yFmt: (v) => signedUsd(v), tooltipFmt: (v) => signedUsd(v),
+    emptyText: open.length ? "Waiting for live prices…" : "No open positions.",
+  });
+  barChart(document.getElementById("perf-bars"), rows);
+}
+
+// Horizontal diverging bars, one per position; color carries the sign, the label carries the value.
+function barChart(host, rows) {
+  host.replaceChildren();
+  if (!rows.length) { host.append(el("div", { class: "empty" }, "No open positions.")); return; }
+  const W = Math.max(260, host.clientWidth), rowH = 26, m = { l: 56, r: 64, t: 6, b: 22 };
+  const H = m.t + m.b + rows.length * rowH, iw = W - m.l - m.r;
+  const lo = Math.min(0, ...rows.map((r) => r.pct)), hi = Math.max(0, ...rows.map((r) => r.pct));
+  const span = hi - lo || 1, pad = span * 0.05;
+  const X = (v) => m.l + ((v - (lo - pad)) / (span + 2 * pad)) * iw;
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Unrealized return by open position" });
+  const zero = X(0);
+  const tip = el("div", { class: "tooltip", role: "status" });
+  rows.forEach((r, i) => {
+    const y = m.t + i * rowH, barY = y + 6, bh = rowH - 12;
+    const x0 = Math.min(zero, X(r.pct)), w = Math.max(2, Math.abs(X(r.pct) - zero));
+    const color = css(r.pct >= 0 ? "--delta-up" : "--delta-down");
+    const name = svg("text", { x: m.l - 8, y: y + rowH / 2 + 4, "text-anchor": "end", "font-size": 12, fill: css("--text-primary") });
+    name.textContent = r.name; root.append(name);
+    root.append(svg("rect", { x: x0, y: barY, width: w, height: bh, rx: 2, fill: color }));
+    // values sit in their own right-hand column, so a long negative bar never runs into its name
+    const val = svg("text", { x: W - 4, y: y + rowH / 2 + 4, "text-anchor": "end", "font-size": 11, fill: css("--text-secondary") });
+    val.style.fontVariantNumeric = "tabular-nums";
+    val.textContent = pct(r.pct); root.append(val);
+    const hit = svg("rect", { x: 0, y, width: W, height: rowH, fill: "transparent" });
+    hit.addEventListener("pointerenter", () => {
+      tip.replaceChildren(el("div", { class: "t" }, r.asset));
+      for (const [k, v] of [["Unrealized", `${signedUsd(r.u)} (${pct(r.pct)})`], ["Entry", priceFmt(r.pos.entry_price)], ["Now", r.last != null ? priceFmt(r.last) : "—"]]) {
+        const row = el("div", { class: "row" }); row.append(el("span", {}, k), el("strong", {}, v)); tip.append(row);
+      }
+      tip.style.display = "block";
+      tip.style.left = Math.min(W - tip.offsetWidth, zero) + "px"; tip.style.top = y + rowH + "px";
+    });
+    hit.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+    root.append(hit);
+  });
+  root.append(svg("line", { x1: zero, x2: zero, y1: m.t, y2: H - m.b, stroke: css("--baseline"), "stroke-width": 1 }));
+  const axis = svg("text", { x: zero, y: H - 6, "text-anchor": "middle", "font-size": 11, fill: css("--text-muted") });
+  axis.textContent = "0%"; root.append(axis);
+  host.append(root, tip);
+}
+
 function renderPositions() {
   const host = document.getElementById("positions-table");
   const open = state.assets.filter((a) => a.paper.position);
@@ -837,7 +957,7 @@ function render() {
   if (!state || !state.ready) return;
   if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];
   document.getElementById("content").hidden = false;
-  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderPositions(); renderCards(); renderDetail();
+  renderHeader(); renderTiles(); renderReturns("crypto"); renderReturns("stock"); renderPerformance(); renderPositions(); renderCards(); renderDetail();
   document.getElementById("crypto-table").hidden = !tableOpen.crypto;
   document.getElementById("stock-table").hidden = !tableOpen.stock;
   document.getElementById("price-table").hidden = !tableOpen.price;
