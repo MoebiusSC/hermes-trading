@@ -45,7 +45,7 @@ TUNABLE = {
     "entry.threshold": (5.0, 95.0),
     "exit_rsi": (55.0, 90.0),
     "stop_loss_pct": (0.2, 10.0),
-    "stop_atr_mult": (0.5, 6.0),
+    "stop_atr_mult": (0.0, 6.0),
     "position_size_r": (0.1, 2.0),
     "take_profit_r": (0.5, 10.0),
     "max_hold_min": (0.0, 2880.0),
@@ -392,6 +392,19 @@ def _bt_brief(r: dict) -> dict:
             "oos_score": r["out_of_sample"]["score"], "oos_return_pct": r["out_of_sample"]["return_pct"], "oos_n": r["out_of_sample"]["n"]}
 
 
+def _recent_duplicate(hypotheses: list[dict], variable: str, value: float) -> bool:
+    """Avoid repeatedly testing the same bounded parameter value in automatic reflection."""
+    for h in hypotheses[-DUPLICATE_LOOKBACK:]:
+        if h.get("variable") != variable:
+            continue
+        try:
+            if abs(float(h.get("new_value")) - float(value)) < 1e-9:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _revert_candidate(trades: list[dict], hypotheses: list[dict], goal: dict) -> dict | None:
     """The last applied automatic change, if it has been measured and made things clearly worse."""
     applied = [h for h in evaluate_changes(trades, hypotheses, goal) if not h.get("rejected")]
@@ -461,7 +474,11 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     except Exception as e:
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
     b, c = _bt_brief(bt_ok), _bt_brief(candidate)
-    # scores saturate at ±1, so an equal score is decided by the return
+    if c["oos_n"] < MIN_OOS_TRADES:
+        verdict = {"verdict": "rejected", "reason": "insufficient_oos_trades",
+                   "minimum_oos_trades": MIN_OOS_TRADES, "baseline": b, "candidate": c,
+                   "period": {"from": bt_ok["from"], "to": bt_ok["to"], "split": bt_ok["split"]}}
+        return Proposal(paths, strategy, hyp, m, s, backtest=verdict, rejected=True)
     better_all = (c["all_score"], c["all_return_pct"]) > (b["all_score"], b["all_return_pct"])
     accepted = c["oos_score"] >= b["oos_score"] and better_all
     verdict = {"verdict": "accepted" if accepted else "rejected", "baseline": b, "candidate": c,
@@ -509,9 +526,13 @@ def apply_proposal(p: Proposal, mode: str) -> str:
     mode = p.mode or mode
     if p.rejected:
         r = reject(p, mode)
+        verdict = (p.backtest or {}).get("verdict")
+        if "candidate" not in (p.backtest or {}):
+            return f"rejected: {r['variable']} {r['old_value']} → {r['new_value']} ({(p.backtest or {}).get('reason', verdict or 'validation failed')})"
         c, b = p.backtest["candidate"], p.backtest["baseline"]
         return (f"rejected by backtest: {r['variable']} {r['old_value']} → {r['new_value']} "
-                f"(out-of-sample score {b['oos_score']:+.2f} → {c['oos_score']:+.2f}, whole period {b['all_score']:+.2f} → {c['all_score']:+.2f})")
+                f"(OOS trades={c['oos_n']}, score {b['oos_score']:+.2f} → {c['oos_score']:+.2f})")
+
     record = apply(p.paths, p.strategy, p.hyp, mode, p.m, p.s, backtest=p.backtest, unclamped=mode == "revert")
     if record is None:
         return f"{p.hyp['variable']} is already at {p.hyp['new_value']} or its bound — no change."
