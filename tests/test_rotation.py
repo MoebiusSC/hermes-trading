@@ -22,6 +22,7 @@ class FakeAlpaca:
         self.held: dict[str, float] = {}
         self.orders: list[tuple[str, str, float]] = []
         self.price = {s: 100.0 for s in growth}
+        self.margin = 1
 
     async def session(self):
         return {"is_open": True, "date": self.date, "minutes_since_open": self.minutes, "next_open": "2026-10-02T09:30"}
@@ -38,7 +39,7 @@ class FakeAlpaca:
         return {s: {"symbol": s, "qty": q, "current_price": self.price[s]} for s, q in self.held.items() if q > 0}
 
     async def account(self):
-        return {"buying_power": str(self.buying_power)}
+        return {"buying_power": str(self.buying_power * self.margin), "cash": str(self.buying_power)}
 
     async def market_order(self, sym, qty, side, client_order_id):
         self.orders.append((sym, side, qty))
@@ -104,6 +105,13 @@ class RotationTests(unittest.TestCase):
         s = self.run_tick(book, broker)
         self.assertIn("bought BBB", s["decision"])
         self.assertEqual(book.paper["pending"], [])
+
+    def test_never_buys_on_margin(self):
+        book, broker = rotation.RotationBook(self.spec, self.root), FakeAlpaca(GROWTH, buying_power=300)
+        broker.margin = 4  # a margin account reports 4x its cash as buying power
+        s = self.run_tick(book, broker)
+        self.assertIn("waiting for cash to buy BBB", s["decision"])
+        self.assertAlmostEqual(book.paper["positions"]["AAA"]["qty"] * 100, 294, delta=0.01)
 
     def test_waits_after_the_open_and_skips_symbols_other_books_trade(self):
         book, broker = rotation.RotationBook(self.spec, self.root), FakeAlpaca(GROWTH, minutes=5)

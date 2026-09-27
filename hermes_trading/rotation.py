@@ -15,7 +15,7 @@ over eight (top 25 of 2016), against 12.5% and 16.6% for holding them all, drawd
 One virtual account in state/rotation/: paper_account.json (cash, equity = start + closed P&L,
 positions, picks, last_rebalance, pending buys), trades.jsonl (each closed position) and
 rankings.jsonl (every ranking and its picks). Orders are real Alpaca paper orders; buys are capped
-by Alpaca's buying power, which the ETF accounts share, and wait in `pending` until there is cash.
+by Alpaca's cash (never margin), which the ETF accounts share, and wait in `pending` until there is cash.
 """
 from __future__ import annotations
 
@@ -212,7 +212,8 @@ class RotationBook:
             return ""
         broker = alpaca.client()
         account = await broker.account()
-        power = float(account.get("buying_power") or 0) * BUYING_POWER_USE
+        # never on margin: the smaller of the cash and the buying power (4x the cash on a margin account)
+        power = min(float(account.get("cash") or 0), float(account.get("buying_power") or 0)) * BUYING_POWER_USE
         target = self.value() / int(self.spec["top"])
         bought, left, notes = [], [], []
         for sym in pending:
@@ -241,7 +242,7 @@ class RotationBook:
         self._save()
         text = ("bought " + ", ".join(bought)) if bought else ""
         if left:
-            text += ("; " if text else "") + f"waiting for cash to buy {', '.join(left)} (Alpaca buying power ${power / BUYING_POWER_USE:,.0f})"
+            text += ("; " if text else "") + f"waiting for cash to buy {', '.join(left)} (Alpaca buying power ${power / BUYING_POWER_USE:,.0f})"  # cash, not margin
         return "; ".join([text, *notes]) if notes else text
 
     async def _sell(self, sym: str, reason: str) -> str:
