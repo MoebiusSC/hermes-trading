@@ -138,10 +138,11 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
     tfe = rules.TF_SECONDS[p["timeframe"]] * 1000
     t, o, h, lo, c = (np.asarray(entry[k], dtype=float) for k in ("t", "open", "high", "low", "close"))
     n = len(t)
-    ema_mode = p["indicator"] == "ema_cross"
+    ema_mode = p["indicator"] in rules.STATE_INDICATORS  # any state signal (ema_cross, tsmom, ma_regime)
     rsi = rules.rsi_series(c)
     atr = rules.atr_series(h, lo, c)
-    states = rules.cross_states(c, p["fast"], p["slow"]) if ema_mode else None
+    states = rules.signal_states(p, c) if ema_mode else None
+    vols = rules.realized_vol_series(c, p["timeframe"]) if p["target_vol"] > 0 else None
     # trend at each entry bar's close: the last trend bar that had closed by then
     trend_at = [None] * n
     if not ema_mode and p["trend_filter"] != "off" and trend and trend["t"]:
@@ -188,7 +189,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             side = pending_entry
             fill_price = rules.fill(o[i], "buy" if side == "long" else "sell", slippage)
             dist = rules.stop_distance(p, fill_price, atr[i - 1], min_stop_frac)
-            qty = rules.size(p, equity, fill_price, dist)
+            qty = rules.size(p, equity, fill_price, dist, rules.vol_scale(p, vols[i - 1]) if vols is not None else 1.0)
             stop, target = rules.levels(p, side, fill_price, dist)
             pos = {"direction": side, "entry_price": fill_price, "qty": qty, "stop": stop, "target": target,
                    "opened_ms": t[i], "fees": qty * fill_price * fee}

@@ -51,10 +51,14 @@ TUNABLE = {
     "max_hold_min": (0.0, 2880.0),
     "entry.fast": (5.0, 100.0),
     "entry.slow": (20.0, 400.0),
+    "entry.lookback": (5.0, 365.0),
+    "entry.ma": (10.0, 400.0),
+    "entry.target_vol": (0.0, 3.0),
 }
 # Values for fields an older strategy.yaml doesn't have (the original behaviour; see strategy.py)
 TUNABLE_DEFAULTS = {"take_profit_r": 2.0, "exit_rsi": 70.0, "stop_atr_mult": 0.0, "max_hold_min": 0.0, "position_pct": 0.0,
-                    "entry.fast": 50.0, "entry.slow": 200.0}
+                    "entry.fast": 50.0, "entry.slow": 200.0, "entry.lookback": 60.0, "entry.ma": 100.0,
+                    "entry.target_vol": 0.0}
 # Largest move allowed per cycle, so one reflection nudges a variable instead of replacing it.
 MAX_STEP = {
     "entry.threshold": 5.0,
@@ -66,6 +70,9 @@ MAX_STEP = {
     "max_hold_min": 120.0,
     "entry.fast": 5.0,
     "entry.slow": 20.0,
+    "entry.lookback": 10.0,
+    "entry.ma": 10.0,
+    "entry.target_vol": 0.1,
 }
 # Settings only changed by hand (dashboard) or by a migration, never by a reflection
 # Numbers only changed by hand: how much of the account a position uses is the owner's call, not the AI's
@@ -78,7 +85,7 @@ REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
 # per asset (median ~10); fewer than MIN_OOS_TRADES is too thin to trust either way.
 VALIDATION_DAYS = 90
 # Slower signals trade less, so they need a longer window for the same out-of-sample evidence
-VALIDATION_DAYS_BY_TF = {"1m": 30, "5m": 60, "15m": 90, "1h": 365, "4h": 730}
+VALIDATION_DAYS_BY_TF = {"1m": 30, "5m": 60, "15m": 90, "1h": 365, "4h": 730, "1d": 1095}
 
 
 def validation_days(strategy: dict) -> int:
@@ -125,7 +132,7 @@ def new_trades_since_last_reflection(trades: list[dict], hypotheses: list[dict])
 
 def fallback_hypothesis(strategy: dict, goal: dict, m: dict) -> dict | None:
     """Drawdown breach is checked first (risk before return); only one rule ever fires."""
-    if rules.params(strategy)["indicator"] == "ema_cross":
+    if rules.params(strategy)["indicator"] in rules.STATE_INDICATORS:
         # trend following: only react to risk, with a wider stop that is hit less by noise
         if m["max_drawdown"] > float(goal["max_drawdown"]):
             old = float(strategy.get("stop_atr_mult", 3) or 3)
@@ -174,6 +181,9 @@ How the strategy trades (strategy.yaml fields):
 - entry.indicator "ema_cross" (trend following): long while EMA(entry.fast) > EMA(entry.slow) on entry.timeframe
   candles, short while below (entry.direction both/long/short); exits and flips at each cross. entry.threshold and
   exit_rsi don't apply; tune entry.fast, entry.slow, stop_atr_mult or take_profit_r (0 = no target) instead.
+- entry.indicator "tsmom" (time-series momentum): long while the close is above the close entry.lookback candles
+  ago, short while below; "ma_regime": long while the close is above its entry.ma-candle simple moving average.
+  Both exit/flip when that changes; entry.target_vol > 0 scales the size down when recent volatility is higher.
 - exits: stop, target (take_profit_r x stop distance), the signal above, or after max_hold_min minutes (0 = no
   limit). Stop distance = stop_atr_mult x ATR(14) when stop_atr_mult > 0, otherwise stop_loss_pct % of the price,
   and never closer than a few times the round-trip cost.

@@ -177,13 +177,16 @@ class AssetBook:
             tc = rules.closed(await self.OHLCV(self.asset, p["trend_filter"], rules.TREND_BARS), p["trend_filter"])
             trend = rules.trend_ok(p["direction"], tc["close"])
         state = target = None
-        if p["indicator"] == "ema_cross":
-            if len(candles["close"]) < p["slow"] + 2:
-                raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles for EMA {p['slow']:g}")
-            state = rules.cross_state(candles["close"], p["fast"], p["slow"])
+        scale = 1.0
+        if p["indicator"] in rules.STATE_INDICATORS:
+            state = rules.signal_state(p, candles["close"])
+            if state is None:
+                raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles for {p['indicator']}")
             target = rules.target_direction(p, state)
+            if p["target_vol"] > 0:
+                scale = rules.vol_scale(p, rules.realized_vol_series(candles["close"], p["timeframe"])[-1])
         return {"p": p, "rsi": round(rsi_now, 4), "atr": None if np.isnan(atr_now) else atr_now, "trend": trend,
-                "state": state, "target": target}
+                "state": state, "target": target, "vol_scale": scale}
 
     def _position(self, strategy: dict, fill: float, qty: float, sig: dict, data: dict, side: str | None = None, **extra) -> dict:
         p = sig["p"]
@@ -213,7 +216,7 @@ class AssetBook:
 
     def _entry_size(self, sig: dict, price_now: float) -> float:
         dist = rules.stop_distance(sig["p"], price_now, sig.get("atr"), self.min_stop_frac)
-        return rules.size(sig["p"], self.paper["equity"], price_now, dist)
+        return rules.size(sig["p"], self.paper["equity"], price_now, dist, sig.get("vol_scale", 1.0))
 
     async def _record_close(self, exit_price: float, reason: str, rsi_value: float | None, **extra) -> None:
         pos = self.paper["position"]
@@ -253,10 +256,10 @@ class AssetBook:
     # --- crypto execution: simulated at the last price, with fees and slippage --------
 
     def _entry_side(self, sig: dict) -> tuple[str | None, str]:
-        """The side to open now, or None with the reason. ema_cross follows the cross (not re-entering
-        a side just stopped out of until the cross changes); rsi enters on its threshold."""
+        """The side to open now, or None with the reason. State signals follow the state (not
+        re-entering a side just stopped out of until it changes); rsi enters on its threshold."""
         p = sig["p"]
-        if p["indicator"] == "ema_cross":
+        if p["indicator"] in rules.STATE_INDICATORS:
             target, blocked = sig.get("target"), self.paper.get("blocked")
             if blocked and target != blocked:
                 self.paper.pop("blocked", None)
@@ -264,7 +267,7 @@ class AssetBook:
             if target is None:
                 return None, "no signal"
             if target == blocked:
-                return None, f"no signal (stopped out of {target}, waiting for the next cross)"
+                return None, f"no signal (stopped out of {target}, waiting for the signal to change)"
             return target, ""
         if not rules.entry_fires(p, sig["rsi"], sig["trend"]):
             if p["trend_filter"] != "off" and sig["trend"] is not True and rules.entry_fires({**p, "trend_filter": "off"}, sig["rsi"], None):
@@ -292,7 +295,7 @@ class AssetBook:
             closed = await self._close_if_due(p, last, sig)
             if not closed:
                 return f"holding {pos['direction']}"
-            if p["indicator"] != "ema_cross":
+            if p["indicator"] not in rules.STATE_INDICATORS:
                 return closed
         side, why = self._entry_side(sig)
         if not side:

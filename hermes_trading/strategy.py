@@ -3,14 +3,24 @@ backtest runs exactly the rules the worker trades.
 
 strategy.yaml fields (the ones marked "since vN" are optional; missing means the original
 behaviour, so an old file trades as it always did):
-  entry.indicator      rsi | ema_cross                                                  (ema_cross since v4)
+  entry.indicator      rsi | ema_cross | tsmom | ma_regime                     (ema_cross v4, tsmom/ma_regime v5)
                        rsi: mean reversion, enter when RSI is stretched, exit when it comes back
-                       ema_cross: trend following, be long while EMA(fast) > EMA(slow), short
-                       while below (as entry.direction allows); exit when they cross
-  entry.direction      long | short | both (both: ema_cross only, flips at each cross)
+                       The others are "state" signals: at every closed candle they say long, short
+                       or flat, and the position follows (as entry.direction allows), exiting or
+                       flipping when the state changes:
+                       ema_cross: long while EMA(fast) > EMA(slow), short while below
+                       tsmom (time-series momentum): long while the close is above the close
+                         `lookback` candles ago, short while below
+                       ma_regime: long while the close is above its simple moving average of `ma`
+                         candles, short (or flat, for direction long) while below
+  entry.direction      long | short | both (both: state signals only)
   entry.threshold      rsi: RSI level; long enters below it, short above it
   entry.fast/slow      ema_cross: EMA periods                                           (default 50 / 200)
-  entry.timeframe      candle size the signal and ATR use: 1m | 5m | 15m | 1h | 4h     (since v2, default 1m)
+  entry.lookback       tsmom: candles back to compare with                              (default 60)
+  entry.ma             ma_regime: moving average length in candles                      (default 100)
+  entry.target_vol     state signals: scale the position down when the annualised volatility of the
+                       last 30 candles is above this (0.5 = 50%/year); 0 = off         (default 0)
+  entry.timeframe      candle size the signal and ATR use: 1m | 5m | 15m | 1h | 4h | 1d  (since v2, default 1m)
   exit_rsi             rsi: long exits when RSI rises to it; short when it falls to 100 - it  (since v2, default 70)
   trend_filter         off | 1h | 4h: only enter with the trend, close above (long) or
                        below (short) the EMA(50) of that timeframe                      (since v2, default off)
@@ -38,8 +48,10 @@ RSI_PERIOD = 14
 ATR_PERIOD = 14
 TREND_EMA = 50
 TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-ENTRY_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h")
-INDICATORS = ("rsi", "ema_cross")
+ENTRY_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+INDICATORS = ("rsi", "ema_cross", "tsmom", "ma_regime")
+STATE_INDICATORS = ("ema_cross", "tsmom", "ma_regime")  # long / short / flat at every candle
+VOL_BARS = 30  # candles of realised volatility for entry.target_vol
 DIRECTIONS = ("long", "short", "both")
 TREND_FILTERS = ("off", "1h", "4h")
 ENTRY_BARS = 100          # candles fetched for the entry timeframe (RSI/ATR warm-up)
@@ -58,6 +70,9 @@ PARAM_BOUNDS = {
     "position_pct": (0.0, 100.0),
     "fast": (2.0, 200.0),
     "slow": (5.0, 400.0),
+    "lookback": (5.0, 365.0),
+    "ma": (10.0, 400.0),
+    "target_vol": (0.0, 3.0),
 }
 
 # Cost model for simulated fills: % per side. Stocks fill at Alpaca (commission-free, real spread).
@@ -71,7 +86,7 @@ def params(strategy: dict) -> dict:
     indicator = str(entry.get("indicator", "rsi"))
     if indicator not in INDICATORS:
         raise ValueError(f"unsupported indicator {indicator!r} ({', '.join(INDICATORS)})")
-    if entry["direction"] not in DIRECTIONS or (indicator == "rsi" and entry["direction"] == "both"):
+    if entry["direction"] not in DIRECTIONS or (indicator not in STATE_INDICATORS and entry["direction"] == "both"):
         raise ValueError(f"unsupported direction {entry['direction']!r} for {indicator}")
     p = {
         "indicator": indicator,
@@ -79,6 +94,9 @@ def params(strategy: dict) -> dict:
         "threshold": float(entry.get("threshold", 30)),
         "fast": float(entry.get("fast", 50)),
         "slow": float(entry.get("slow", 200)),
+        "lookback": float(entry.get("lookback", 60)),
+        "ma": float(entry.get("ma", 100)),
+        "target_vol": float(entry.get("target_vol", 0) or 0),
         "timeframe": str(entry.get("timeframe", "1m")),
         "exit_rsi": float(strategy.get("exit_rsi", 70)),
         "trend_filter": str(strategy.get("trend_filter", "off")),
@@ -103,8 +121,11 @@ def params(strategy: dict) -> dict:
 
 
 def bars_needed(p: dict) -> int:
-    """Closed candles the signal needs, with room for the EMA to settle."""
-    return max(ENTRY_BARS, int(p["slow"] * 3)) if p["indicator"] == "ema_cross" else ENTRY_BARS
+    """Closed candles the signal needs (with room for an EMA to settle)."""
+    need = {"ema_cross": int(p["slow"] * 3), "tsmom": int(p["lookback"]) + 5, "ma_regime": int(p["ma"]) + 5}.get(p["indicator"], 0)
+    if p["target_vol"] > 0:
+        need = max(need, VOL_BARS + 5)
+    return max(ENTRY_BARS, need)
 
 
 def costs(goal: dict, stock: bool) -> tuple[float, float]:
@@ -208,8 +229,52 @@ def cross_states(closes, fast: float, slow: float) -> np.ndarray:
     return out
 
 
+def signal_states(p: dict, closes) -> np.ndarray:
+    """State signal (+1 long, -1 short, 0 not enough history) at every candle, for the backtester."""
+    c = np.asarray(closes, dtype=float)
+    if p["indicator"] == "ema_cross":
+        return cross_states(c, p["fast"], p["slow"])
+    out = np.zeros(len(c))
+    if p["indicator"] == "tsmom":
+        n = int(p["lookback"])
+        if len(c) > n:
+            out[n:] = np.sign(c[n:] - c[:-n])
+    elif p["indicator"] == "ma_regime":
+        n = int(p["ma"])
+        if len(c) >= n:
+            sma = np.convolve(c, np.ones(n) / n, mode="valid")  # sma[k] covers c[k .. k+n-1]
+            out[n - 1:] = np.where(c[n - 1:] > sma, 1, -1)
+    return out
+
+
+def signal_state(p: dict, closes) -> int | None:
+    """The state signal now (see signal_states); None without enough history."""
+    states = signal_states(p, closes)
+    return int(states[-1]) if len(states) and states[-1] != 0 else None
+
+
+def realized_vol_series(closes, tf: str, n: int = VOL_BARS) -> np.ndarray:
+    """Annualised volatility of the last n candle returns, at every candle (NaN before)."""
+    c = np.asarray(closes, dtype=float)
+    out = np.full(len(c), np.nan)
+    if len(c) <= n:
+        return out
+    r = np.diff(c) / c[:-1]
+    per_year = 365 * 86400 / TF_SECONDS[tf]
+    for i in range(n, len(c)):
+        out[i] = float(np.std(r[i - n:i], ddof=1)) * np.sqrt(per_year)
+    return out
+
+
+def vol_scale(p: dict, vol: float | None) -> float:
+    """entry.target_vol: the share of the normal size to take at this volatility (never above 1)."""
+    if p["target_vol"] <= 0 or vol is None or not np.isfinite(vol) or vol <= 0:
+        return 1.0
+    return min(1.0, p["target_vol"] / vol)
+
+
 def target_direction(p: dict, state: int | float | None) -> str | None:
-    """ema_cross: the side the strategy wants to be on now, or None to be flat."""
+    """State signals: the side the strategy wants to be on now, or None to be flat."""
     if not state:
         return None
     side = "long" if state > 0 else "short"
@@ -238,29 +303,30 @@ def levels(p: dict, direction: str, fill: float, dist: float) -> tuple[float, fl
     return fill - sign * dist, target
 
 
-def size(p: dict, equity: float, price: float, dist: float) -> float:
+def size(p: dict, equity: float, price: float, dist: float, scale: float = 1.0) -> float:
     """Units for a new position, never leveraged: position_pct % of equity when set, otherwise
-    such that hitting the stop loses position_size_r % of equity."""
+    such that hitting the stop loses position_size_r % of equity; times `scale` (vol_scale)."""
     if equity <= 0:
         return 0.0
     if price <= 0:
         raise ValueError(f"price must be positive, got {price:g}")
     if dist <= 0:
         raise ValueError(f"stop distance must be positive, got {dist:g}")
+    scale = min(1.0, max(0.0, scale))
     if p.get("position_pct", 0) > 0:
-        return equity * p["position_pct"] / 100 / price
-    return min((equity * p["position_size_r"] / 100) / dist, equity / price)
+        return equity * p["position_pct"] / 100 / price * scale
+    return min((equity * p["position_size_r"] / 100) / dist, equity / price) * scale
 
 
 def exit_reason(pos: dict, p: dict, last: float, rsi_value: float | None, now_ms: float,
                 target: str | None = None) -> str | None:
-    """Why to close now. `target` is the ema_cross side wanted now (target_direction)."""
+    """Why to close now. `target` is the side a state signal wants now (target_direction)."""
     is_long = pos["direction"] == "long"
     if (last <= pos["stop"]) if is_long else (last >= pos["stop"]):
         return "stop_loss"
     if pos.get("target") is not None and ((last >= pos["target"]) if is_long else (last <= pos["target"])):
         return "take_profit"
-    if p["indicator"] == "ema_cross":
+    if p["indicator"] in STATE_INDICATORS:
         if target != pos["direction"]:
             return "signal_exit"
     elif rsi_value is not None and not np.isnan(rsi_value):
