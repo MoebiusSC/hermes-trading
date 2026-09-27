@@ -34,7 +34,8 @@ stock_equity_per_asset: 200  # virtual account per stock; together within the $1
 stock_equity_overrides:      # accounts opened under the earlier $500 default
   SPY: 500
   QQQ: 500
-target_return_30d: 0.05      # success
+target_return_30d: 0.02      # success: ~27%/yr, the top of what the backtests reached (5% a month, ~80%/yr,
+                             # pushed the reflection to chase risk; scripts/research_improve.py)
 max_drawdown:      0.08      # failure
 min_sharpe:        1.2       # quality bar
 failure_below:     -0.04     # score floor — steeply negative below this
