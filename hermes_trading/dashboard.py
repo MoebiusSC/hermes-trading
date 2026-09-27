@@ -235,6 +235,7 @@ def _stock_candles(symbol: str, tf: str = "1m") -> dict:
 
 
 def candles(asset: str, tf: str = "1m") -> dict:
+    asset = config.symbol(asset)  # sleeves ("BTC/USDT@momentum") chart their market
     if tf not in TIMEFRAMES:
         raise ValueError(f"unknown timeframe {tf!r}")
     key = (asset, tf)

@@ -634,7 +634,8 @@ function svg(tag, attrs = {}) {
   return n;
 }
 const isStock = (asset) => !asset.includes("/");
-const short = (asset) => asset.split("/")[0];
+// "BTC/USDT@momentum" is a second strategy on BTC/USDT with its own account: "BTC·momentum"
+const short = (asset) => { const [sym, sleeve] = asset.split("@"); const base = sym.split("/")[0]; return sleeve ? `${base}·${sleeve}` : base; };
 // Hues are assigned in goal order within each category; past the sixth asset lines fall back to muted ink.
 const colorFor = (asset) => {
   const i = state.goal.assets.filter((a) => isStock(a) === isStock(asset)).indexOf(asset);

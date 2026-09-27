@@ -108,7 +108,8 @@ class AssetBook:
     OHLCV = staticmethod(price.ohlcv)
 
     def __init__(self, asset: str, start_equity: float = START_EQUITY, costs: tuple[float, float] = (0.0, 0.0)) -> None:
-        self.asset = asset
+        self.asset = asset  # the id: "BTC/USDT", or "BTC/USDT@momentum" for an extra strategy
+        self.symbol = config.symbol(asset)  # the market it trades
         self.start_equity = start_equity
         self.fee, self.slippage = costs  # fractions per side, applied to simulated fills
         self.min_stop_frac = 0.0  # closest a stop may be (set by make_book from goal.yaml costs)
@@ -140,7 +141,7 @@ class AssetBook:
                 status[name] = "circuit_open"
                 return
             try:
-                results[name] = await fetch_with_retry(name, fn, self.asset)
+                results[name] = await fetch_with_retry(name, fn, self.symbol)
             except SchemaError:
                 raise
             except Exception as e:
@@ -167,14 +168,14 @@ class AssetBook:
     async def signals(self, strategy: dict) -> dict:
         """RSI, ATR, the EMA cross and the trend filter on the strategy's timeframe, from closed candles."""
         p = rules.params(strategy)
-        candles = rules.closed(await self.OHLCV(self.asset, p["timeframe"], rules.bars_needed(p) + 1), p["timeframe"])
+        candles = rules.closed(await self.OHLCV(self.symbol, p["timeframe"], rules.bars_needed(p) + 1), p["timeframe"])
         if len(candles["close"]) < rules.RSI_PERIOD + 2:
             raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles")
         rsi_now = float(rules.rsi_series(candles["close"])[-1])
         atr_now = float(rules.atr_series(candles["high"], candles["low"], candles["close"])[-1])
         trend = None
         if p["trend_filter"] != "off":
-            tc = rules.closed(await self.OHLCV(self.asset, p["trend_filter"], rules.TREND_BARS), p["trend_filter"])
+            tc = rules.closed(await self.OHLCV(self.symbol, p["trend_filter"], rules.TREND_BARS), p["trend_filter"])
             trend = rules.trend_ok(p["direction"], tc["close"])
         state = target = None
         scale = 1.0
@@ -363,7 +364,7 @@ class AssetBook:
 
     async def _quote(self) -> tuple[float, float]:
         """Last price and RSI, for a manual action between ticks."""
-        data = await fetch_with_retry("price", self.ADAPTERS["price"], self.asset)
+        data = await fetch_with_retry("price", self.ADAPTERS["price"], self.symbol)
         return data["last"], rsi(data["closes"])
 
     async def manual_sell(self) -> str:
@@ -442,7 +443,7 @@ class StockBook(AssetBook):
         if p["direction"] != "long":
             raise ValueError("stocks are long-only here (shorting is disabled on the Alpaca account)")
         broker = alpaca.client()
-        held = await broker.position(self.asset)
+        held = await broker.position(self.symbol)
         pos = self.paper["position"]
 
         if pos and held is None:
@@ -491,7 +492,7 @@ class StockBook(AssetBook):
         if sig["p"]["direction"] != "long":
             raise ValueError("las acciones y los ETFs solo operan en long")
         await self._require_open_market()
-        if await alpaca.client().position(self.asset) is not None:
+        if await alpaca.client().position(self.symbol) is not None:
             raise ValueError(f"Alpaca ya tiene {self.asset} fuera de este worker")
         last, _ = await self._quote()
         result = await self._buy(strategy, last, sig, {}, manual=True)
@@ -506,7 +507,7 @@ class StockBook(AssetBook):
         broker = alpaca.client()
         client_id = f"hermes-{config.asset_slug(self.asset)}-{uuid.uuid4().hex[:10]}"
         try:
-            order = await broker.wait_filled((await broker.market_order(self.asset, qty, "buy", client_id))["id"])
+            order = await broker.wait_filled((await broker.market_order(self.symbol, qty, "buy", client_id))["id"])
         except AlpacaError as e:
             return f"entry rejected: {e.message}"[:200]
         fill, filled_qty = float(order["filled_avg_price"]), float(order["filled_qty"])
@@ -519,7 +520,7 @@ class StockBook(AssetBook):
     async def _sell(self, reason: str, rsi_value: float) -> str:
         broker = alpaca.client()
         try:
-            order = await broker.close_position(self.asset)
+            order = await broker.close_position(self.symbol)
         except AlpacaError as e:
             text = e.message.lower()
             if e.status == 403 and ("day trad" in text or "pattern" in text):
@@ -536,7 +537,7 @@ class StockBook(AssetBook):
     async def _reconcile_external_close(self, last: float, rsi_value: float) -> str:
         """Our record says open, Alpaca says flat: someone closed it outside the worker."""
         pos = self.paper["position"]
-        fill = await alpaca.client().last_sell_fill(self.asset, pos["opened_at"])
+        fill = await alpaca.client().last_sell_fill(self.symbol, pos["opened_at"])
         if fill:
             await self._record_close(float(fill["filled_avg_price"]), "external_close", rsi_value, exit_order_id=fill["id"])
             return "position was closed outside the worker — recorded"

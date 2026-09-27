@@ -32,9 +32,9 @@ costs:                       # % per side on simulated fills (stocks fill at Alp
   crypto: {fee_pct: 0.1, slippage_pct: 0.02}
   min_stop_x_costs: 3        # a stop is never closer than 3x the round-trip cost
 risk:                        # portfolio limits checked before every automatic entry
-  max_open_positions: 19     # the crypto trend strategy is always in the market: one position per pair
-  max_open_crypto: 12
-  max_exposure_pct: 60       # invested value / total capital (12 pairs at 30% of their account ~ 30%)
+  max_open_positions: 31     # always-in-market strategies: one position per pair and sleeve, plus ETFs
+  max_open_crypto: 24        # 12 pairs x (trend + momentum sleeve)
+  max_exposure_pct: 60       # invested value / total capital (24 accounts at 30% ~ 30%)
 strategy_defaults:           # applied once at boot to strategies that predate them (recorded as "migration")
   exit_rsi: 75               # the first key marks a strategy as migrated
   entry.timeframe: "15m"
@@ -71,3 +71,35 @@ strategy_migrations:         # named one-off changes, applied once per asset at 
       configuración se eligió con el último año y los dos anteriores sirvieron de verificación. Al 30%, la
       cartera: +13,7%, +21,7% y +14,3%, drawdown máximo 12,5%. La estrategia RSI anterior perdió -19% en el
       último año. Los ETFs no cambian: ahí seguir la tendencia rinde bastante menos que mantener.
+  - id: trend-4h-v2
+    kinds: [crypto]
+    changes:
+      stop_atr_mult: 5.0
+    note: >-
+      Stop de 5 ATR en lugar de 3. Backtest de 5 años (sep 2021 - sep 2026) con los 12 pares y costos:
+      junto con la sub-cuenta de momentum, la combinación EMA 50/200 con stop de 5 ATR tuvo el mejor
+      Sharpe de 5 años (0,98) de 650 combinaciones, dentro de una meseta de configuraciones parecidas
+      (0,93-0,98), no un pico aislado.
+sleeves:                     # extra strategies per pair, each with its own simulated account (asset@sleeve)
+  momentum:
+    kinds: [crypto]
+    strategy:
+      entry.indicator: tsmom
+      entry.direction: long
+      entry.timeframe: "1d"
+      entry.lookback: 120
+      entry.target_vol: 0.5
+      trend_filter: "off"
+      stop_atr_mult: 3.0
+      take_profit_r: 0
+      max_hold_min: 0
+      position_pct: 30
+    note: >-
+      Sub-cuenta de momentum: long mientras el cierre diario supera al de hace 120 días (fuera cuando
+      no), con el tamaño reducido si la volatilidad pasa del 50% anual, 30% de la cuenta por posición.
+      Opera junto a la estrategia de tendencia del par, cada una con su cuenta. Backtest de 5 años con
+      costos, 50/50 con la tendencia (100% de exposición): -5,3%, -0,6%, +68%, +58%, +25% por año (sep
+      2021-26), Sharpe 0,98, frente a -15,8%, -5,2%, +61%, +56%, +48,5% y Sharpe 0,81 de la tendencia
+      sola; comprar y mantener: -50%, -9%, +141%, +100%, -37%. Refinando la combinación año a año con
+      solo los datos anteriores (walk-forward), los años 3-5 dieron Sharpe 1,19 frente a 0,85 de la
+      tendencia sola.

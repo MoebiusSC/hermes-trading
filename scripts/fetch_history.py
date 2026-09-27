@@ -38,10 +38,14 @@ def main() -> None:
     config.load_env()
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=1100)
+    ap.add_argument("--tfs", default="1h,4h,1d", help="comma-separated candle sizes")
+    ap.add_argument("--crypto-only", action="store_true")
     args = ap.parse_args()
     goal = load_yaml(config.GOAL_FILE)
     for asset in config.goal_assets(goal):
-        tfs = ("1h", "4h", "1d")
+        if args.crypto_only and config.is_stock(asset):
+            continue
+        tfs = tuple(args.tfs.split(","))
         for tf in tfs:
             try:
                 h = backtest.history(asset, tf, args.days)

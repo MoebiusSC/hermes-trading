@@ -101,6 +101,7 @@ def _fetch_stock(symbol: str, tf: str, since_ms: int) -> dict:
 
 
 def history(asset: str, tf: str, days: float) -> dict:
+    asset = config.symbol(asset)  # an extra strategy ("BTC/USDT@momentum") shares its market's candles
     """Closed candles covering the last `days`, from the disk cache topped up with new bars."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / f"{config.asset_slug(asset)}_{tf}.json"

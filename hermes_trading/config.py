@@ -59,6 +59,19 @@ class AssetPaths:
         return self.root / "paper_account.json"
 
 
+SLEEVE_SEP = "@"  # "BTC/USDT@momentum": a second strategy on BTC/USDT, with its own account
+
+
+def symbol(asset: str) -> str:
+    """The market an asset trades: its id without the sleeve ("BTC/USDT@momentum" -> "BTC/USDT")."""
+    return asset.split(SLEEVE_SEP, 1)[0]
+
+
+def sleeve(asset: str) -> str | None:
+    """The sleeve name of an extra strategy ("momentum"), or None for the pair's main strategy."""
+    return asset.split(SLEEVE_SEP, 1)[1] if SLEEVE_SEP in asset else None
+
+
 def asset_slug(asset: str) -> str:
     return asset.replace("/", "-")
 
@@ -83,7 +96,7 @@ DEFAULT_STOCK_EQUITY = 500.0
 
 def is_stock(asset: str) -> bool:
     """Crypto pairs are written BASE/QUOTE (BTC/USDT); stocks and ETFs are bare tickers (SPY)."""
-    return "/" not in asset
+    return "/" not in symbol(asset)
 
 
 def start_equity(asset: str, goal: dict) -> float:

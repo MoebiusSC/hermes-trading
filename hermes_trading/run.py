@@ -77,7 +77,7 @@ def migrate_strategies(goal: dict, assets: list[str]) -> None:
     note = str(goal.get("strategy_defaults_note") or "Nuevos valores por defecto elegidos por backtest.")
     for asset in assets:
         paths = config.asset_paths(asset)
-        if not paths.strategy.exists():
+        if config.sleeve(asset) or not paths.strategy.exists():
             continue
         strategy = load_yaml(paths.strategy)
         try:
@@ -97,16 +97,20 @@ def migrate_strategies(goal: dict, assets: list[str]) -> None:
 def apply_migrations(goal: dict, assets: list[str]) -> None:
     """goal.yaml `strategy_migrations`: named, one-off changes for the assets of the listed kinds,
     each recorded as a "migration" change. A strategy lists the migrations it received, so a
-    migration runs once per asset even across restarts. A crypto migration also writes the crypto
-    template, so pairs added later start from it."""
+    migration runs once per asset even across restarts. A migration applies to the pairs' main
+    strategies, or with `sleeve: <name>` to that sleeve's strategies only. A crypto migration of main
+    strategies also writes the crypto template, so pairs added later start from it."""
     for migration in goal.get("strategy_migrations") or []:
         mid, changes = str(migration["id"]), dict(migration["changes"])
         kinds = set(migration.get("kinds") or ("crypto", "stock"))
+        target_sleeve = migration.get("sleeve")
         note = str(migration.get("note") or "Cambio de estrategia elegido por backtest.")
         for asset in assets:
             stock = config.is_stock(asset)
             paths = config.asset_paths(asset)
             if ("stock" if stock else "crypto") not in kinds or not paths.strategy.exists():
+                continue
+            if config.sleeve(asset) != target_sleeve:
                 continue
             if mid in (load_yaml(paths.strategy).get("migrations") or []):
                 continue
@@ -115,12 +119,40 @@ def apply_migrations(goal: dict, assets: list[str]) -> None:
             strategy["migrations"] = [*(strategy.get("migrations") or []), mid]
             dump_yaml(paths.strategy, strategy)
             print(f"Migration {mid} → {asset}: " + (", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records) or "nothing to change"), flush=True)
-        if "crypto" in kinds:
+        if "crypto" in kinds and not target_sleeve:
             template = load_yaml(config.STRATEGY_TEMPLATE)
             for key, value in changes.items():
                 reflect._set_path_creating(template, key, value)
             template["migrations"] = [*(template.get("migrations") or []), mid]
             dump_yaml(config.STRATEGY_TEMPLATE_CRYPTO, template)
+
+
+def ensure_sleeves(goal: dict) -> dict:
+    """goal.yaml `sleeves`: extra strategies run next to each pair's main one, each in its own
+    account ("BTC/USDT@momentum", same market). Adds any missing sleeve to goal.yaml's assets and
+    starts its strategy from the template plus the sleeve's settings (recorded as a migration).
+    Returns the goal re-read with the sleeves listed."""
+    sleeves = goal.get("sleeves") or {}
+    if not sleeves:
+        return goal
+    for name, spec in sleeves.items():
+        kinds = set(spec.get("kinds") or ("crypto",))
+        changes = dict(spec.get("strategy") or {})
+        note = str(spec.get("note") or f"Sub-cuenta '{name}' creada.")
+        for base in config.goal_assets(load_yaml(config.GOAL_FILE)):
+            if config.sleeve(base) or ("stock" if config.is_stock(base) else "crypto") not in kinds:
+                continue
+            sid = f"{base}{config.SLEEVE_SEP}{name}"
+            if sid not in config.goal_assets(load_yaml(config.GOAL_FILE)):
+                config.add_goal_asset(config.GOAL_FILE, sid)
+            paths = config.asset_paths(sid)
+            if paths.strategy.exists():
+                continue
+            paths.history.mkdir(parents=True, exist_ok=True)
+            dump_yaml(paths.strategy, load_yaml(config.STRATEGY_TEMPLATE))
+            reflect.apply_manual(paths, changes, config.is_stock(base), mode="migration", rationale=note)
+            print(f"Sleeve {sid} created", flush=True)
+    return load_yaml(config.GOAL_FILE)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -143,6 +175,10 @@ def main(argv: list[str] | None = None) -> None:
     migrate_legacy_layout(assets[0])
     migrate_strategies(goal, config.goal_assets(goal))
     apply_migrations(goal, config.goal_assets(goal))
+    goal = ensure_sleeves(goal)
+    apply_migrations(goal, config.goal_assets(goal))  # sleeve migrations, for sleeves just created too
+    if not args.asset:
+        assets = config.goal_assets(goal)
     state_server.start()
     try:
         worker = Worker(assets, goal)
