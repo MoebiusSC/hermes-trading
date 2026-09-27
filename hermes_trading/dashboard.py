@@ -138,9 +138,22 @@ def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
                 "tick": (heartbeat.get("assets") or {}).get(asset),
             }
         )
+    rotation = None
+    if (goal.get("rotation") or {}).get("enabled", True) and goal.get("rotation"):
+        root = state_dir / "rotation"
+        spec = goal["rotation"]
+        rotation = {
+            "settings": spec,
+            "paper": _read_json(root / "paper_account.json") or {"start_equity": float(spec.get("capital", 0)), "cash": float(spec.get("capital", 0)),
+                                                                  "equity": float(spec.get("capital", 0)), "positions": {}, "picks": [], "pending": []},
+            "trades": read_jsonl(root / "trades.jsonl"),
+            "rankings": read_jsonl(root / "rankings.jsonl")[-12:],
+            "tick": heartbeat.get("rotation"),
+        }
     return {
         "ready": True,
         "goal": goal,
+        "rotation": rotation,
         "worker": {k: v for k, v in heartbeat.items() if k != "assets"},
         "pulled_at": pulled_at,
         "assets": assets,

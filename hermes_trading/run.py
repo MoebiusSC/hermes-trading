@@ -99,8 +99,8 @@ def apply_migrations(goal: dict, assets: list[str]) -> None:
     each recorded as a "migration" change. A strategy lists the migrations it received, so a
     migration runs once per asset even across restarts. A migration applies to the pairs' main
     strategies, or with `sleeve: <name>` to that sleeve's strategies only; `assets: [pairs]` limits it
-    to those pairs. A crypto migration of all main strategies also writes the crypto template, so
-    pairs added later start from it."""
+    to those pairs. A migration of all main strategies of one kind also writes that kind's template
+    (crypto or stock), so assets added later start from it."""
     for migration in goal.get("strategy_migrations") or []:
         mid, changes = str(migration["id"]), dict(migration["changes"])
         kinds = set(migration.get("kinds") or ("crypto", "stock"))
@@ -121,12 +121,18 @@ def apply_migrations(goal: dict, assets: list[str]) -> None:
             strategy["migrations"] = [*(strategy.get("migrations") or []), mid]
             dump_yaml(paths.strategy, strategy)
             print(f"Migration {mid} → {asset}: " + (", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records) or "nothing to change"), flush=True)
-        if "crypto" in kinds and not target_sleeve and not only:
-            template = load_yaml(config.STRATEGY_TEMPLATE)
-            for key, value in changes.items():
+    # each kind's template: the base template plus every migration of all that kind's main strategies, in order
+    for kind, kind_template in (("crypto", config.STRATEGY_TEMPLATE_CRYPTO), ("stock", config.STRATEGY_TEMPLATE_STOCK)):
+        migrations = [m for m in goal.get("strategy_migrations") or []
+                      if set(m.get("kinds") or ("crypto", "stock")) == {kind} and not m.get("sleeve") and not m.get("assets")]
+        if not migrations:
+            continue
+        template = load_yaml(config.STRATEGY_TEMPLATE)
+        for migration in migrations:
+            for key, value in dict(migration["changes"]).items():
                 reflect._set_path_creating(template, key, value)
-            template["migrations"] = [*(template.get("migrations") or []), mid]
-            dump_yaml(config.STRATEGY_TEMPLATE_CRYPTO, template)
+        template["migrations"] = [str(m["id"]) for m in migrations]
+        dump_yaml(kind_template, template)
 
 
 def ensure_sleeves(goal: dict) -> dict:

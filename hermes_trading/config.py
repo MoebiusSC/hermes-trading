@@ -8,6 +8,7 @@ State layout (the Railway volume mirrors this):
   state/events.jsonl                 worker issues, recoveries, reflection failures, added assets
   state/assets/<BASE-QUOTE>/         per-asset: strategy.yaml, trades.jsonl, hypotheses.jsonl,
                                      paper_account.json, history/
+  state/rotation/                    the stock rotation: paper_account.json, trades.jsonl, rankings.jsonl
 """
 from __future__ import annotations
 
@@ -24,10 +25,12 @@ STATE_SEED = ROOT / "state_seed"
 GOAL_FILE = STATE / "goal.yaml"
 STRATEGY_TEMPLATE = STATE / "strategy.template.yaml"
 STRATEGY_TEMPLATE_CRYPTO = STATE / "strategy.template.crypto.yaml"  # new crypto pairs, when a migration wrote it
+STRATEGY_TEMPLATE_STOCK = STATE / "strategy.template.stock.yaml"  # new stocks and ETFs, when a migration wrote it
 HEARTBEAT_FILE = STATE / "heartbeat.json"
 EQUITY_FILE = STATE / "equity.jsonl"  # capital snapshots for the dashboard's equity curve
 EVENTS_FILE = STATE / "events.jsonl"  # worker issues and actions for the dashboard's activity feed
 ASSETS_DIR = STATE / "assets"
+ROTATION_DIR = STATE / "rotation"  # the monthly momentum rotation's account (rotation.py)
 
 # Files the single-asset version kept at the state root; run.py migrates them on boot.
 LEGACY_FILES = ("strategy.yaml", "trades.jsonl", "hypotheses.jsonl", "paper_account.json")
@@ -85,8 +88,8 @@ def ensure_asset_state(asset: str) -> AssetPaths:
     paths = asset_paths(asset)
     paths.history.mkdir(parents=True, exist_ok=True)
     if not paths.strategy.exists():
-        crypto_template = not is_stock(asset) and STRATEGY_TEMPLATE_CRYPTO.exists()
-        shutil.copy2(STRATEGY_TEMPLATE_CRYPTO if crypto_template else STRATEGY_TEMPLATE, paths.strategy)
+        kind_template = STRATEGY_TEMPLATE_STOCK if is_stock(asset) else STRATEGY_TEMPLATE_CRYPTO
+        shutil.copy2(kind_template if kind_template.exists() else STRATEGY_TEMPLATE, paths.strategy)
     return paths
 
 

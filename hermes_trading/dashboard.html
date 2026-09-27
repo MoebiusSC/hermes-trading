@@ -238,6 +238,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
     <button type="button" role="tab" data-tab="resumen">Resumen</button>
     <button type="button" role="tab" data-tab="posiciones">Posiciones</button>
     <button type="button" role="tab" data-tab="activos">Activos</button>
+    <button type="button" role="tab" data-tab="rotacion">Rotación</button>
     <button type="button" role="tab" data-tab="estrategia">Estrategia e IA</button>
     <button type="button" role="tab" data-tab="actividad">Actividad<span class="badge" id="alert-badge" hidden></span></button>
   </nav>
@@ -255,7 +256,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
           </div>
           <span class="spacer"></span>
           <div class="seg" id="equity-scope" role="group" aria-label="Qué activos incluir">
-            <button type="button" data-scope="all">Todo</button><button type="button" data-scope="crypto">Criptos</button><button type="button" data-scope="stock">ETFs</button>
+            <button type="button" data-scope="all">Todo</button><button type="button" data-scope="crypto">Criptos</button><button type="button" data-scope="stock">Acciones</button>
           </div>
         </div>
         <div class="kpis" id="equity-kpis"></div>
@@ -458,6 +459,32 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
       </section>
     </section>
 
+    <!-- ================= Rotación ================= -->
+    <section id="tab-rotacion" role="tabpanel" hidden>
+      <section class="panel">
+        <h2>Rotación mensual de acciones</h2>
+        <div class="sub" id="rot-sub"></div>
+        <div class="kpis" id="rot-kpis"></div>
+        <div class="insight" id="rot-decision"></div>
+      </section>
+      <div class="split">
+        <section class="panel">
+          <h2>Posiciones</h2>
+          <div class="sub">Compradas en Alpaca (cuenta paper) a partes iguales; se mantienen hasta el siguiente rebalanceo</div>
+          <div class="table-wrap" id="rot-positions"></div>
+        </section>
+        <section class="panel">
+          <h2>Último ranking</h2>
+          <div class="sub" id="rot-ranking-sub"></div>
+          <div class="table-wrap" id="rot-ranking"></div>
+        </section>
+      </div>
+      <section class="panel section">
+        <h2>Operaciones cerradas</h2>
+        <div class="table-wrap" id="rot-trades"></div>
+      </section>
+    </section>
+
     <!-- ================= Actividad ================= -->
     <section id="tab-actividad" role="tabpanel" hidden>
       <section class="panel">
@@ -479,7 +506,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
 "use strict";
 const SERIES_VARS = ["--series-1", "--series-2", "--series-3", "--series-4", "--series-5", "--series-6"];
 const SVGNS = "http://www.w3.org/2000/svg";
-const TABS = ["resumen", "posiciones", "activos", "estrategia", "actividad"];
+const TABS = ["resumen", "posiciones", "activos", "rotacion", "estrategia", "actividad"];
 let state = null;
 let candles = {};        // asset -> 1-minute candles (sparklines, live prices, RSI, open P&L)
 const tfCandles = {};    // "asset|tf" -> candles for the price chart
@@ -533,6 +560,7 @@ const reasonEs = (r) => REASONS[r] || String(r).replace(/_/g, " ");
 const DECISIONS = [
   [/^no signal$/, "Sin señal"],
   [/^no signal \(stopped out of (long|short), waiting for the (?:next cross|signal to change)\)$/, "Sin señal (stop en $1: espera a que cambie la señal)"],
+  [/^sold by hand: buys again with a manual buy$/, "Vendido a mano: no recompra hasta una compra manual"],
   [/^no signal \(against the trend\)$/, "Sin señal (RSI en zona de entrada, pero en contra de la tendencia)"],
   [/^skip: risk limit: (\d+) positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones abiertas (máx. $2)"],
   [/^skip: risk limit: (\d+) crypto positions open \(max (\d+)\)$/, "Omitido por límite de riesgo: $1 posiciones cripto abiertas (máx. $2)"],
@@ -553,6 +581,17 @@ const DECISIONS = [
   [/^position missing at Alpaca and no sell found — recorded at last price$/, "Posición no encontrada en Alpaca y sin venta: registrada al último precio"],
   [/^position already gone at Alpaca — reconciling next tick$/, "La posición ya no está en Alpaca: se concilia en el próximo ciclo"],
   [/^error$/, "Error"],
+  // rotation.py
+  [/^holding nothing until next month$/, "Sin posiciones hasta el próximo mes"],
+  [/^holding (.+) until next month$/, "Mantiene $1 hasta el próximo mes"],
+  [/^waiting · trades from (\d+) min after the open$/, "Esperando · opera desde $1 min tras la apertura"],
+  [/^rebalanced \((.+)\): picks (.+)$/, "Rebalanceo de $1: elegidas $2"],
+  [/^sold (\S+)$/, "Vendida $1"],
+  [/^bought (.+)$/, "Comprado $1"],
+  [/^waiting for cash to buy (.+) \(Alpaca buying power (.+)\)$/, "Esperando saldo para comprar $1 (poder de compra en Alpaca: $2)"],
+  [/^(\S+) not bought: (.*)$/, "$1 no se compró: $2"],
+  [/^(\S+) not sold: (.*)$/, "$1 no se vendió: $2"],
+  [/^could not sell (.+)$/, "No se pudo vender $1"],
 ];
 function decisionEs(text) {
   // a tick can close and open in one go ("closed long (signal_exit); opened short")
@@ -588,7 +627,7 @@ const VAR_LABEL = { "entry.threshold": "RSI de entrada", "entry.direction": "Dir
   trend_filter: "Filtro de tendencia", exit_rsi: "RSI de salida", stop_loss_pct: "Stop loss %", stop_atr_mult: "Stop (× ATR)", position_pct: "Exposición por posición %",
   take_profit_r: "Objetivo (× stop)", position_size_r: "Riesgo por operación %", max_hold_min: "Tiempo máximo (min)" };
 const TF_LABEL = { "1m": "1 min", "5m": "5 min", "15m": "15 min", "1h": "1 h", "4h": "4 h", "1d": "1 día", off: "sin filtro" };
-const STATE_SIGNALS = ["ema_cross", "tsmom", "ma_regime"];  // long / short / flat, follows the signal
+const STATE_SIGNALS = ["ema_cross", "tsmom", "ma_regime", "hold"];  // long / short / flat, follows the signal
 // Strategy fields with the original behaviour when an older strategy.yaml doesn't have them (strategy.py)
 function stratView(s) {
   return { indicator: s.entry.indicator || "rsi", fast: s.entry.fast ?? 50, slow: s.entry.slow ?? 200,
@@ -597,9 +636,9 @@ function stratView(s) {
     trend: s.trend_filter || "off", exitRsi: s.exit_rsi ?? 70, stopPct: s.stop_loss_pct, atrMult: s.stop_atr_mult ?? 0,
     tp: s.take_profit_r ?? 2, risk: s.position_size_r, maxHold: s.max_hold_min ?? 0, posPct: s.position_pct ?? 0 };
 }
-const stopText = (v) => (v.atrMult > 0 ? `${v.atrMult}× ATR` : `${v.stopPct}%`);
+const stopText = (v) => (v.indicator === "hold" ? "sin stop" : v.atrMult > 0 ? `${v.atrMult}× ATR` : `${v.stopPct}%`);
 const DIR_LABEL = { long: "long", short: "short", both: "long + short" };
-const signalText = (v) => ({ ema_cross: `EMA ${v.fast}/${v.slow}`, tsmom: `Momentum ${v.lookback}`, ma_regime: `Media ${v.ma}` }[v.indicator]
+const signalText = (v) => ({ ema_cross: `EMA ${v.fast}/${v.slow}`, tsmom: `Momentum ${v.lookback}`, ma_regime: `Media ${v.ma}`, hold: "Mantener" }[v.indicator]
   || `RSI < ${v.threshold} → ${v.exitRsi}`);
 function smaLine(closes, n) {
   const out = new Array(closes.length).fill(null);
@@ -659,8 +698,22 @@ function unrealized(a) {
   return (p.direction === "long" ? 1 : -1) * p.qty * (last - p.entry_price) + (p.funding || 0);
 }
 const scopeAssets = (scope) => state.assets.filter((a) => scope === "all" || a.kind === scope);
-function totals(assets) {
+// The rotation's account (rotation.py): one account holding several stocks
+const rotPositions = () => (state.rotation ? Object.entries(state.rotation.paper.positions || {}) : []);
+const rotPrice = (p) => p.last_price ?? p.entry_price;
+const rotUnrealized = () => rotPositions().reduce((s, [, p]) => s + p.qty * (rotPrice(p) - p.entry_price), 0);
+const rotInvested = () => rotPositions().reduce((s, [, p]) => s + p.qty * rotPrice(p), 0);
+function totals(assets, withRotation = assets.some((a) => a.kind === "stock")) {
   const t = { start: 0, realized: 0, unreal: 0, invested: 0, open: 0, long: 0, short: 0, stopRisk: 0, biggest: null };
+  if (withRotation && state.rotation) {
+    const rp = state.rotation.paper, n = rotPositions().length;
+    t.start += rp.start_equity; t.realized += rp.equity; t.unreal += rotUnrealized(); t.invested += rotInvested();
+    t.open += n; t.long += n;
+    for (const [sym, p] of rotPositions()) {
+      const value = p.qty * rotPrice(p);
+      if (!t.biggest || value > t.biggest.value) t.biggest = { asset: `${sym} (rotación)`, value };
+    }
+  }
   for (const a of assets) {
     t.start += a.start_equity; t.realized += a.paper.equity;
     const p = a.paper.position;
@@ -1155,7 +1208,7 @@ function renderEquity() {
 }
 
 function renderQuality() {
-  const groups = [["Total", state.assets], ["Criptos", scopeAssets("crypto")], ["ETFs", scopeAssets("stock")]];
+  const groups = [["Total", state.assets], ["Criptos", scopeAssets("crypto")], ["ETFs y acciones", scopeAssets("stock")]];
   const stats = groups.map(([name, assets]) => [name, tradeStats(assets.flatMap((a) => a.trades))]);
   const pf = (v) => (v == null ? "—" : v === Infinity ? "∞" : v.toFixed(2));
   const rows = [
@@ -1223,7 +1276,7 @@ function renderExposure(all) {
   );
   const bar = document.getElementById("exposure-bar"), legend = document.getElementById("exposure-legend");
   bar.replaceChildren(); legend.replaceChildren();
-  for (const [name, v, color] of [["Criptos", crypto.invested, css("--series-1")], ["ETFs", stock.invested, css("--series-2")], ["Sin invertir", Math.max(0, all.equity - all.invested), css("--grid")]]) {
+  for (const [name, v, color] of [["Criptos", crypto.invested, css("--series-1")], ["Acciones", stock.invested, css("--series-2")], ["Sin invertir", Math.max(0, all.equity - all.invested), css("--grid")]]) {
     const seg = el("span"); seg.style.width = pctOf(v) + "%"; seg.style.background = color; bar.append(seg);
     const item = el("span"), key = el("span", { class: "key" }); key.style.background = color; key.style.height = "8px";
     item.append(key, document.createTextNode(`${name} ${pctOf(v).toFixed(0)}%`)); legend.append(item);
@@ -1442,7 +1495,63 @@ function renderPositions() {
       priceFmt(pos.stop), priceFmt(pos.target), last != null ? usd(pos.qty * last) : "—",
       `${((pos.qty * pos.entry_price) / a.paper.equity * 100).toFixed(0)}%`,
       { text: signedUsd(u), cls: signCls(u) }, { node: btn, cls: "act" }];
-  }), { empty: "Sin posiciones abiertas." });
+  }).concat(rotPositions().map(([sym, p]) => {
+    const u = p.qty * (rotPrice(p) - p.entry_price);
+    return [{ text: `${sym} · rotación · long`, cls: "wrap" }, priceFmt(p.entry_price), priceFmt(rotPrice(p)), "—", "—", usd(p.qty * rotPrice(p)),
+      `${((p.qty * p.entry_price) / state.rotation.paper.equity * 100).toFixed(0)}%`, { text: signedUsd(u), cls: signCls(u) },
+      { text: "mensual", cls: "act muted" }];
+  })), { empty: "Sin posiciones abiertas." });
+}
+
+// ================= Rotación =================
+function nextRebalance(last) {
+  // first trading day of the month after the last rebalance (weekends skipped; market holidays aren't known here)
+  const now = new Date();
+  let y = now.getFullYear(), m = now.getMonth();
+  if (last === `${y}-${String(m + 1).padStart(2, "0")}`) m += 1;
+  const d = new Date(y, m, 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d;
+}
+function renderRotacion() {
+  const r = state.rotation;
+  const sub = document.getElementById("rot-sub");
+  if (!r) {
+    sub.textContent = "Desactivada: se configura en goal.yaml (rotation).";
+    for (const id of ["rot-kpis", "rot-decision", "rot-positions", "rot-ranking", "rot-trades"]) document.getElementById(id).replaceChildren();
+    return;
+  }
+  const s = r.settings, rp = r.paper, tick = r.tick || {};
+  const value = rp.cash + rotInvested(), ret = (value / rp.start_equity - 1) * 100;
+  sub.textContent = `Cada mes, el primer día hábil (${s.after_open_min ?? 30} min después de la apertura), compra las ${s.top ?? 5} acciones de su universo (${(s.universe || []).length}) con mejor retorno de 12 meses sin el último mes, a partes iguales, y vende las que salen del top.`;
+  const next = nextRebalance(rp.last_rebalance);
+  document.getElementById("rot-kpis").replaceChildren(
+    kpi("Valor de la cuenta", usd(value), signCls(ret), `${pct(ret)} sobre ${usd(rp.start_equity, 0)}`),
+    kpi("No realizado", signedUsd(rotUnrealized()), signCls(rotUnrealized())),
+    kpi("Realizado", signedUsd(rp.equity - rp.start_equity), signCls(rp.equity - rp.start_equity), `${r.trades.length} ${r.trades.length === 1 ? "posición cerrada" : "posiciones cerradas"}`),
+    kpi("Efectivo", usd(rp.cash), "", (rp.pending || []).length ? `pendiente de comprar: ${rp.pending.join(", ")}` : ""),
+    kpi("Próximo rebalanceo", next.toLocaleDateString([], { day: "numeric", month: "short" }), "", rp.last_rebalance ? `último: ${rp.last_rebalance}` : "aún no rebalanceó"),
+  );
+  const decision = document.getElementById("rot-decision");
+  decision.textContent = tick.error ? `Error: ${tick.error}` : tick.decision ? `Worker: ${decisionEs(tick.decision)}` : "";
+  const picks = new Set(rp.picks || []);
+  table(document.getElementById("rot-positions"), ["Acción", "Cantidad", "Entrada", "Ahora", "Valor", "Peso", "No realizado"],
+    rotPositions().map(([sym, p]) => {
+      const v = p.qty * rotPrice(p), u = p.qty * (rotPrice(p) - p.entry_price);
+      return [sym, p.qty.toFixed(4), priceFmt(p.entry_price), priceFmt(rotPrice(p)), usd(v), value ? `${((v / value) * 100).toFixed(0)}%` : "—",
+        { text: `${signedUsd(u)} (${pct((rotPrice(p) / p.entry_price - 1) * 100)})`, cls: signCls(u) }];
+    }), { empty: (rp.pending || []).length ? `Esperando saldo en Alpaca para comprar ${rp.pending.join(", ")}.` : "Sin posiciones: compra en el próximo rebalanceo." });
+  const last = r.rankings.length ? r.rankings[r.rankings.length - 1] : null;
+  document.getElementById("rot-ranking-sub").textContent = last
+    ? `${last.month} · retorno de 12 meses sin el último mes${(last.failed || []).length ? ` · sin datos: ${last.failed.join(", ")}` : ""}`
+    : "Se calcula en el primer rebalanceo.";
+  table(document.getElementById("rot-ranking"), ["#", "Acción", "Momentum 12-1", ""],
+    last ? last.ranking.map(([sym, m], i) => [String(i + 1), sym, { text: pct(m * 100, 1), cls: signCls(m) },
+      picks.has(sym) ? { text: "elegida", cls: "up" } : ""]) : [], { empty: "Sin ranking todavía." });
+  table(document.getElementById("rot-trades"), ["Acción", "Apertura", "Cierre", "Entrada", "Salida", "Motivo", "P&L"],
+    r.trades.slice().reverse().map((t) => [t.symbol, dateTimeFmt(Date.parse(t.opened_at)), dateTimeFmt(Date.parse(t.closed_at)),
+      priceFmt(t.entry_price), priceFmt(t.exit_price), t.exit_reason === "rotation_exit" ? "salió del top" : reasonEs(t.exit_reason),
+      { text: `${signedUsd(t.pnl)} (${pct((t.exit_price / t.entry_price - 1) * 100)})`, cls: signCls(t.pnl) }]), { empty: "Aún no hay posiciones cerradas." });
 }
 
 // ================= Activos =================
@@ -1593,6 +1702,15 @@ function renderDetail() {
       height: 200, label: `${a.asset} medias`, tooltipFmt: priceFmt, yFmt: (v) => priceFmt(v), emptyText: "Cargando velas…",
     });
   }
+  if (sv && sv.indicator === "hold") {
+    const ce = tfCandles[`${a.asset}|${sv.timeframe}`];
+    document.getElementById("rsi-title").textContent = `Comprar y mantener · velas de ${TF_LABEL[sv.timeframe]}`;
+    document.getElementById("rsi-sub").textContent = `Siempre invertido con el ${sv.posPct}% de la cuenta; sin stop, sin objetivo y sin ventas automáticas`;
+    lineChart(document.getElementById("rsi-chart"), {
+      series: [{ name: "Precio", color, points: ce ? ce.t.map((t, i) => [t, ce.close[i]]) : [] }],
+      height: 200, label: `${a.asset} precio`, tooltipFmt: priceFmt, yFmt: (v) => priceFmt(v), emptyText: "Cargando velas…",
+    });
+  }
   if (sv && (sv.indicator === "tsmom" || sv.indicator === "ma_regime")) {
     const ce = tfCandles[`${a.asset}|${sv.timeframe}`];
     const isMa = sv.indicator === "ma_regime", n = isMa ? sv.ma : sv.lookback;
@@ -1643,7 +1761,9 @@ function renderDetail() {
     const st = tradeStats(a.trades), bh = buyHold(a);
     const v = stratView(strat);
     const volRow = v.targetVol > 0 ? [["Volatilidad objetivo", `${(v.targetVol * 100).toFixed(0)}% anual (reduce el tamaño si la supera)`]] : [];
-    const signalRows = v.indicator === "ema_cross" ? [
+    const signalRows = v.indicator === "hold" ? [
+      ["Señal", "comprar y mantener: siempre invertido"], ["Dirección", "long"], ["Salida", "ninguna automática (solo manual)"],
+    ] : v.indicator === "ema_cross" ? [
       ["Señal", `cruce de EMA ${v.fast}/${v.slow} en velas de ${TF_LABEL[v.timeframe]} (seguimiento de tendencia)`], ["Dirección", DIR_LABEL[v.direction]],
       ["Salida", "al cruzarse las medias (y cambia de lado si opera long + short)"], ...volRow,
     ] : v.indicator === "tsmom" ? [
@@ -1659,7 +1779,7 @@ function renderDetail() {
     ];
     const rows = [
       ...signalRows,
-      ["Stop", stopText(v)], ["Objetivo", v.tp > 0 ? v.tp + "× distancia del stop" : "sin objetivo"],
+      ["Stop", stopText(v)], ["Objetivo", v.tp > 0 && v.indicator !== "hold" ? v.tp + "× distancia del stop" : "sin objetivo"],
       ["Tiempo máximo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "sin límite"],
       ["Tamaño", v.posPct > 0 ? `fijo: ${v.posPct}% de la cuenta` : `según riesgo: se pierde ${v.risk}% de la cuenta si toca el stop`],
       ["Rentabilidad total", pct(assetTotalRet(a), 3)], ["Comprar y mantener", bh ? `${pct(bh.ret, 3)} desde ${dateTimeFmt(Date.parse(bh.since))}` : "—"],
@@ -1704,8 +1824,8 @@ const SETTINGS = [
   { key: "position_pct", label: "Exposición por posición %", min: 0, max: 100, step: 5, fallback: 0, hint: "% de la cuenta que usa cada posición; 0 = según el riesgo por operación y el stop" },
 ];
 const SELECTS = [
-  { key: "entry.indicator", label: "Tipo de señal", options: ["rsi", "ema_cross", "tsmom", "ma_regime"],
-    labels: { rsi: "RSI (reversión)", ema_cross: "Cruce de EMA (tendencia)", tsmom: "Momentum (serie temporal)", ma_regime: "Precio vs media móvil" }, fallback: "rsi" },
+  { key: "entry.indicator", label: "Tipo de señal", options: ["rsi", "ema_cross", "tsmom", "ma_regime", "hold"],
+    labels: { rsi: "RSI (reversión)", ema_cross: "Cruce de EMA (tendencia)", tsmom: "Momentum (serie temporal)", ma_regime: "Precio vs media móvil", hold: "Comprar y mantener" }, fallback: "rsi" },
   { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m", "1h", "4h", "1d"], fallback: "1m" },
   { key: "trend_filter", only: ["rsi"], label: "Filtro de tendencia", options: ["off", "1h", "4h"], fallback: "off" },
 ];
@@ -1920,8 +2040,12 @@ function feedItems() {
         what: h.rejected ? `${MODE_LABEL[h.mode] || h.mode} propuso ${text}` : `${MODE_LABEL[h.mode] || h.mode}: ${text} (${versions})`,
         why: (h.rationale || "") + evalNote(h), h });
   }
+  for (const t of state.rotation ? state.rotation.trades : []) {
+    items.push({ ts: t.closed_at, cat: "trade", cls: t.pnl >= 0 ? "good" : "bad", asset: `${t.symbol} (rotación)`,
+      what: `Vende a ${priceFmt(t.exit_price)} · ${signedUsd(t.pnl)} (${pct((t.exit_price / t.entry_price - 1) * 100)})`, why: t.exit_reason === "rotation_exit" ? "salió del top" : reasonEs(t.exit_reason) });
+  }
   for (const e of state.events || []) {
-    const text = e.kind === "issue" ? decisionEs(e.text) : e.kind === "recovered" ? "Vuelve a la normalidad"
+    const text = e.kind === "issue" || e.kind === "rotation" ? decisionEs(e.text) : e.kind === "recovered" ? "Vuelve a la normalidad"
       : e.kind === "reflect_error" ? "Falló la reflexión: " + e.text : e.text;
     // asset_added already names the asset in its text
     items.push({ ts: e.ts, cat: "system", cls: e.level === "error" ? "error" : e.level === "warn" ? "warn" : e.kind === "recovered" ? "good" : "",
@@ -1998,7 +2122,7 @@ document.getElementById("add-form").addEventListener("submit", async (ev) => {
 });
 
 // ---------- render + tabs ----------
-const RENDER = { resumen: renderResumen, posiciones: renderPosiciones, activos: renderActivos, estrategia: renderEstrategia, actividad: renderActividad };
+const RENDER = { resumen: renderResumen, posiciones: renderPosiciones, activos: renderActivos, rotacion: renderRotacion, estrategia: renderEstrategia, actividad: renderActividad };
 function render() {
   if (!state || !state.ready) return;
   if (!selected || !state.goal.assets.includes(selected)) selected = state.goal.assets[0];

@@ -104,6 +104,21 @@ strategy_migrations:         # named one-off changes, applied once per asset at 
       PAXG solo en largo: los shorts se simulan ahora como perpetuos de OKX (comisión 0,05% y funding) y
       OKX no lista un perpetuo de PAXG, así que un short no sería ejecutable. El short abierto se cierra
       en el primer ciclo tras el despliegue (signal_exit).
+  - id: etf-hold-v1
+    kinds: [stock]
+    changes:
+      entry.indicator: hold
+      entry.timeframe: "1d"
+      trend_filter: "off"
+      take_profit_r: 0
+      max_hold_min: 0
+      position_pct: 100
+    note: >-
+      ETFs en comprar y mantener: cada uno invierte toda su cuenta y la conserva, sin stop ni ventas
+      automáticas. Backtest de 5 años (sep 2021 - sep 2026) con velas ajustadas: el RSI de 15 min que
+      operaban perdió en 6 de los 7 ETFs (SPY +1,2%/año frente a +13,2% manteniendo; QQQ -6,2% frente a
+      +15,7%; VOO -4,4% frente a +13,3%; GLD -10,2% frente a +19,2%; USO -7,6% frente a +23,8%). La media
+      de 200 días bajaba la caída máxima (SPY 19% frente a 24%) pero ganaba menos (SPY +10,0%/año).
 sleeves:                     # extra strategies per pair, each with its own simulated account (asset@sleeve)
   momentum:
     kinds: [crypto]
@@ -127,3 +142,18 @@ sleeves:                     # extra strategies per pair, each with its own simu
       sola; comprar y mantener: -50%, -9%, +141%, +100%, -37%. Refinando la combinación año a año con
       solo los datos anteriores (walk-forward), los años 3-5 dieron Sharpe 1,19 frente a 0,85 de la
       tendencia sola.
+rotation:                    # monthly momentum rotation across large US stocks (rotation.py), its own account
+  enabled: true
+  capital: 5000              # virtual account; orders share the Alpaca paper balance with the ETFs
+  top: 5                     # stocks held, equal weight
+  lookback_days: 252         # 12-1 month momentum: close 21 trading days ago over 252 days ago
+  skip_days: 21
+  after_open_min: 30         # rebalances on the first trading day of each month, 30 min after the open
+  universe: [NVDA, MSFT, AAPL, GOOGL, AMZN, META, AVGO, TSLA, BRK.B, JPM, WMT, LLY, V, ORCL, MA,
+             NFLX, XOM, COST, JNJ, HD, PLTR, BAC, ABBV, PG, AMD]  # ~25 largest US companies (Sep 2026)
+  note: >-
+    Rotación mensual: cada mes compra las 5 acciones del universo con mejor retorno de 12 meses sin el
+    último mes, a partes iguales, y vende las que salen del top. Backtest con velas ajustadas: 20,7%/año
+    en 5 años (las 25 más grandes de 2021 + AMD) y 19,6%/año en 8 años (las 25 más grandes de 2016),
+    frente a 12,5% y 16,6% manteniéndolas todas y 13,2% y 14,7% de SPY; caída máxima ~35%, similar a
+    mantener. Operar cada acción con las señales del bot rendía la mitad (7-9%/año).

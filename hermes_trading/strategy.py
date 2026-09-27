@@ -3,7 +3,7 @@ backtest runs exactly the rules the worker trades.
 
 strategy.yaml fields (the ones marked "since vN" are optional; missing means the original
 behaviour, so an old file trades as it always did):
-  entry.indicator      rsi | ema_cross | tsmom | ma_regime                     (ema_cross v4, tsmom/ma_regime v5)
+  entry.indicator      rsi | ema_cross | tsmom | ma_regime | hold          (ema_cross v4, tsmom/ma_regime v5, hold v6)
                        rsi: mean reversion, enter when RSI is stretched, exit when it comes back
                        The others are "state" signals: at every closed candle they say long, short
                        or flat, and the position follows (as entry.direction allows), exiting or
@@ -13,6 +13,8 @@ behaviour, so an old file trades as it always did):
                          `lookback` candles ago, short while below
                        ma_regime: long while the close is above its simple moving average of `ma`
                          candles, short (or flat, for direction long) while below
+                       hold: buy and hold (long only, needs position_pct): always long, no stop
+                         and no target; set by hand or by a migration, never by a reflection
   entry.direction      long | short | both (both: state signals only)
   entry.threshold      rsi: RSI level; long enters below it, short above it
   entry.fast/slow      ema_cross: EMA periods                                           (default 50 / 200)
@@ -49,8 +51,9 @@ ATR_PERIOD = 14
 TREND_EMA = 50
 TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 ENTRY_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
-INDICATORS = ("rsi", "ema_cross", "tsmom", "ma_regime")
-STATE_INDICATORS = ("ema_cross", "tsmom", "ma_regime")  # long / short / flat at every candle
+INDICATORS = ("rsi", "ema_cross", "tsmom", "ma_regime", "hold")
+STATE_INDICATORS = ("ema_cross", "tsmom", "ma_regime", "hold")  # long / short / flat at every candle
+AUTO_INDICATORS = ("rsi", "ema_cross", "tsmom", "ma_regime")  # the ones a reflection may switch to
 VOL_BARS = 30  # candles of realised volatility for entry.target_vol
 DIRECTIONS = ("long", "short", "both")
 TREND_FILTERS = ("off", "1h", "4h")
@@ -115,6 +118,8 @@ def params(strategy: dict) -> dict:
         value = p[name]
         if not lo <= value <= hi:
             raise ValueError(f"strategy {name!r} must be between {lo:g} and {hi:g}, got {value:g}")
+    if indicator == "hold" and (p["direction"] != "long" or p["position_pct"] <= 0):
+        raise ValueError("hold is long only and needs position_pct (the share of the account it keeps invested)")
     if indicator == "ema_cross" and p["fast"] >= p["slow"]:
         raise ValueError(f"entry.fast ({p['fast']:g}) must be below entry.slow ({p['slow']:g})")
     return p
@@ -274,7 +279,9 @@ def signal_states(p: dict, closes) -> np.ndarray:
     if p["indicator"] == "ema_cross":
         return cross_states(c, p["fast"], p["slow"])
     out = np.zeros(len(c))
-    if p["indicator"] == "tsmom":
+    if p["indicator"] == "hold":
+        out[:] = 1
+    elif p["indicator"] == "tsmom":
         n = int(p["lookback"])
         if len(c) > n:
             out[n:] = np.sign(c[n:] - c[:-n])
@@ -340,6 +347,8 @@ def stop_distance(p: dict, price: float, atr: float | None, floor_frac: float = 
 
 
 def levels(p: dict, direction: str, fill: float, dist: float) -> tuple[float, float]:
+    if p["indicator"] == "hold":  # no stop, no target
+        return 0.0, float("inf")
     sign = 1 if direction == "long" else -1
     target = fill + sign * dist * p["take_profit_r"] if p["take_profit_r"] > 0 else sign * float("inf")
     return fill - sign * dist, target

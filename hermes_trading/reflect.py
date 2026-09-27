@@ -77,7 +77,7 @@ MAX_STEP = {
 # Settings only changed by hand (dashboard) or by a migration, never by a reflection
 # Numbers only changed by hand: how much of the account a position uses is the owner's call, not the AI's
 MANUAL_NUMBERS = {"position_pct": (0.0, 100.0)}
-CHOICES = {"entry.indicator": rules.INDICATORS, "entry.direction": rules.DIRECTIONS,
+CHOICES = {"entry.indicator": rules.INDICATORS,  # "hold" too, by hand; a reflection proposes AUTO_INDICATORS only "entry.direction": rules.DIRECTIONS,
            "entry.timeframe": rules.ENTRY_TIMEFRAMES, "trend_filter": rules.TREND_FILTERS}
 AUTO_MODES = ("hermes", "llm", "fallback", "revert")  # changes the reflection made (not manual/migration)
 REVERT_MARGIN = 0.05  # revert when the measured score fell by more than this
@@ -480,6 +480,8 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
 
     if not trades:
         return "no closed trades yet — nothing to reflect on."
+    if str(strategy.get("entry", {}).get("indicator")) == "hold":
+        return "buy and hold — the owner's choice, not tuned by reflection."
     pending = new_trades_since_last_reflection(trades, hypotheses)
     if pending < int(goal["reflection_every"]) and not force:
         return f"{pending}/{goal['reflection_every']} new closed trades since last reflection — waiting."
@@ -511,6 +513,9 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
         hyp = fallback_hypothesis(strategy, goal, m)
     if hyp is None:
         return f"targets met (score {s}) — no change this cycle."
+    if hyp["variable"] == "entry.indicator" and hyp["new_value"] not in rules.AUTO_INDICATORS:
+        return Proposal(paths, strategy, hyp, m, s, rejected=True,
+                        backtest={"verdict": "rejected", "reason": "invalid", "error": f"{hyp['new_value']} is set by hand only"})
     if _recent_duplicate(hypotheses, hyp["variable"], _bounded(strategy, hyp)):
         # logged as rejected so the cadence restarts instead of asking the same question every cycle
         return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "duplicate"}, rejected=True)

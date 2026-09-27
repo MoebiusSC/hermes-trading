@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from rich.console import Console
 
-from . import config, reflect
+from . import config, reflect, rotation
 from . import strategy as rules
 from .adapters import SchemaError, alpaca, check_schema, macro, news, onchain, price, stocks
 from .adapters.alpaca import AlpacaError
@@ -299,6 +299,8 @@ class AssetBook:
                 blocked = None
             if target is None:
                 return None, "no signal"
+            if target == blocked and p["indicator"] == "hold":
+                return None, "sold by hand: buys again with a manual buy"
             if target == blocked:
                 return None, f"no signal (stopped out of {target}, waiting for the signal to change)"
             return target, ""
@@ -405,7 +407,11 @@ class AssetBook:
             pos = self.paper["position"]
             if not pos:
                 raise ValueError(f"{self.asset} no tiene una posición abierta")
-            return await self._manual_sell(pos)
+            result = await self._manual_sell(pos)
+            if str(load_yaml(self.paths.strategy)["entry"].get("indicator")) == "hold" and not self.paper["position"]:
+                self.paper["blocked"] = "long"  # sold by hand: a buy-and-hold account stays out until bought by hand
+                self._save_paper()
+            return result
 
     async def _manual_sell(self, pos: dict) -> str:
         last, rsi_value = await self._quote()
@@ -438,6 +444,7 @@ class AssetBook:
             if self.paper["position"]:
                 raise ValueError(f"{self.asset} ya tiene una posición abierta")
             strategy = load_yaml(self.paths.strategy)
+            self.paper.pop("blocked", None)
             return await self._manual_buy(strategy, await self.signals(strategy))
 
     async def _manual_buy(self, strategy: dict, sig: dict) -> str:
@@ -604,6 +611,10 @@ class Worker:
         self._issues: dict[str, str | None] = {}  # asset -> the issue last logged, so each is logged once
         self._last_snapshot = float("-inf")  # first snapshot on the first tick
         self.reflect_every_s = float(REFLECT_EVERY_S)
+        spec = rotation.settings(goal)
+        self.rotation = rotation.RotationBook(spec) if spec else None  # monthly stock rotation, its own account
+        if self.rotation:
+            self.rotation.exclude = {config.symbol(b.asset) for b in self.books if config.is_stock(b.asset)}
 
     # --- dashboard records ---------------------------------------------------
 
@@ -648,6 +659,13 @@ class Worker:
                 agg["unrealized"] += sign * pos["qty"] * (price_now - pos["entry_price"]) + pos.get("funding", 0.0)
                 agg["invested"] += pos["qty"] * price_now
                 agg["open"] += 1
+        if self.rotation:
+            agg = kinds["stock"]
+            agg["start"] += self.rotation.start_equity
+            agg["realized"] += float(self.rotation.paper["equity"])
+            agg["unrealized"] += self.rotation.unrealized()
+            agg["invested"] += self.rotation.invested()
+            agg["open"] += len(self.rotation.paper["positions"])
         record = {"ts": utcnow(), **{k: {f: round(v, 4) for f, v in agg.items()} for k, agg in kinds.items()}}
         try:
             append_jsonl(config.EQUITY_FILE, record)
@@ -720,6 +738,8 @@ class Worker:
         book = make_book(asset, load_yaml(config.GOAL_FILE))
         book.worker = self
         self.books.append(book)
+        if self.rotation and config.is_stock(asset):
+            self.rotation.exclude.add(config.symbol(asset))  # one owner per Alpaca position
         message = f"{asset} añadido con una cuenta simulada de ${book.start_equity:,.0f}".replace(",", ".")
         self.event("asset_added", message, asset)
         if buy:
@@ -790,9 +810,17 @@ class Worker:
         return mode, float(config.env("HERMES_REFLECT_EVERY_S", str(REFLECT_EVERY_S)))
 
     async def tick(self) -> None:
-        summaries = await asyncio.gather(*(book.tick() for book in self.books))
+        rotating = [self.rotation.tick()] if self.rotation else []
+        *summaries, = await asyncio.gather(*(book.tick() for book in self.books), *rotating)
+        rot = summaries.pop() if rotating else None
         by_asset = {book.asset: s for book, s in zip(self.books, summaries)}
-        self._heartbeat("running", by_asset)
+        self._heartbeat("running", by_asset, **({"rotation": rot} if rot else {}))
+        if rot:
+            self._log_issue("rotación", rot)
+            if rot["decision"].startswith(("rebalanced", "bought")):
+                self.event("rotation", rot["decision"][:400], "rotación")
+            if rot.get("market") != "closed":
+                console.log(f"rotation value={rot['value']:.2f} → {rot['decision']}")
         for asset, s in by_asset.items():
             if s.get("last_price") is not None:
                 self.last_prices[asset] = s["last_price"]

@@ -144,6 +144,10 @@ class Alpaca:
                 return None
             raise
 
+    async def positions(self) -> dict[str, dict]:
+        """Every open position at Alpaca, by symbol."""
+        return {row["symbol"]: row for row in await self._req("GET", f"{PAPER_URL}/v2/positions") or []}
+
     async def market_order(self, symbol: str, qty: float, side: str, client_order_id: str) -> dict:
         return await self._req(
             "POST",
