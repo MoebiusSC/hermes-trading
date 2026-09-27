@@ -18,6 +18,18 @@ assets:                      # each gets its own strategy, paper account and ref
   - "USO"
   - "SECZ"
   - "VOO"
+  - "BTC/USDT@momentum"
+  - "SOL/USDT@momentum"
+  - "ETH/USDT@momentum"
+  - "DOGE/USDT@momentum"
+  - "XRP/USDT@momentum"
+  - "BNB/USDT@momentum"
+  - "LINK/USDT@momentum"
+  - "AVAX/USDT@momentum"
+  - "ADA/USDT@momentum"
+  - "SUI/USDT@momentum"
+  - "LTC/USDT@momentum"
+  - "PAXG/USDT@momentum"
 stock_equity_per_asset: 200  # virtual account per stock; together within the $1,000 Alpaca balance
 stock_equity_overrides:      # accounts opened under the earlier $500 default
   SPY: 500
