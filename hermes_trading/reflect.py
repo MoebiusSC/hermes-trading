@@ -168,7 +168,10 @@ def build_prompt(asset: str, strategy: dict, goal: dict, trades: list[dict], m: 
         if config.is_stock(asset)
         else "a crypto spot pair traded 24/7"
     )
-    fee, slip = rules.costs(goal, config.is_stock(asset))
+    stock = config.is_stock(asset)
+    cost_text = "; ".join(
+        f"{side}s fee {f * 100:.3f}%, slippage {sl * 100:.3f}%" + (" plus perpetual funding" if rules.pays_funding(goal, stock, side) else "")
+        for side, (f, sl) in ((side, rules.costs(goal, stock, side)) for side in ("long", "short")))
     backtest_text = "not available"
     if bt:
         backtest_text = json.dumps({k: bt[k] for k in ("from", "to", "buy_hold_pct", "all", "in_sample", "out_of_sample")})
@@ -189,7 +192,7 @@ How the strategy trades (strategy.yaml fields):
   and never closer than a few times the round-trip cost.
 - size: position_size_r % of the account is lost if the stop is hit, unless position_pct > 0 (set by the owner, not
   tunable): then every position uses position_pct % of the account and position_size_r has no effect.
-- costs per side: fee {fee * 100:.3f}%, slippage {slip * 100:.3f}% (already included in all P&L below).
+- costs per side of a trade: {cost_text} (already included in all P&L below).
 
 Walk-forward backtest of the CURRENT strategy on recent history (in sample = first 70%, out of sample = last 30%):
 {backtest_text}

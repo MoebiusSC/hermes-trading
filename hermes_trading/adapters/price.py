@@ -84,6 +84,33 @@ async def fetch(asset: str) -> dict:
     raise RuntimeError("no exchange returned prices — " + "; ".join(errors))
 
 
+_funding_cache: dict[tuple[str, str], tuple[float, list]] = {}
+FUNDING_TTL_S = 600  # rates settle every 8 h (some pairs 4 h); a few requests an hour is plenty
+
+
+async def funding(asset: str, venue: str, since_ms: int) -> list:
+    """Settled funding rates [[ms, rate], ...] of the asset's USDT perpetual on `venue`, from
+    `since_ms`. [] when the venue lists no perpetual for it."""
+    import time
+
+    key = (asset, venue)
+    hit = _funding_cache.get(key)
+    if not hit or time.monotonic() - hit[0] >= FUNDING_TTL_S:
+        client = _client(venue, False)
+        try:
+            await client.load_markets()
+            if asset + ":USDT" not in client.markets:
+                rows = []
+            else:
+                rows = [[int(r["timestamp"]), float(r["fundingRate"])]
+                        for r in await client.fetch_funding_rate_history(asset + ":USDT", limit=100)]
+        except Exception as e:
+            raise RuntimeError(f"{venue} funding for {asset}: {type(e).__name__}: {e}"[:200]) from e
+        hit = (time.monotonic(), sorted(rows))
+        _funding_cache[key] = hit
+    return [r for r in hit[1] if r[0] >= since_ms]
+
+
 _ohlcv_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 PAGE = 300  # OKX serves at most 300 candles per request
 

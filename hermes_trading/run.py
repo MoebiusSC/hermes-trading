@@ -98,19 +98,21 @@ def apply_migrations(goal: dict, assets: list[str]) -> None:
     """goal.yaml `strategy_migrations`: named, one-off changes for the assets of the listed kinds,
     each recorded as a "migration" change. A strategy lists the migrations it received, so a
     migration runs once per asset even across restarts. A migration applies to the pairs' main
-    strategies, or with `sleeve: <name>` to that sleeve's strategies only. A crypto migration of main
-    strategies also writes the crypto template, so pairs added later start from it."""
+    strategies, or with `sleeve: <name>` to that sleeve's strategies only; `assets: [pairs]` limits it
+    to those pairs. A crypto migration of all main strategies also writes the crypto template, so
+    pairs added later start from it."""
     for migration in goal.get("strategy_migrations") or []:
         mid, changes = str(migration["id"]), dict(migration["changes"])
         kinds = set(migration.get("kinds") or ("crypto", "stock"))
         target_sleeve = migration.get("sleeve")
+        only = set(migration.get("assets") or ())
         note = str(migration.get("note") or "Cambio de estrategia elegido por backtest.")
         for asset in assets:
             stock = config.is_stock(asset)
             paths = config.asset_paths(asset)
             if ("stock" if stock else "crypto") not in kinds or not paths.strategy.exists():
                 continue
-            if config.sleeve(asset) != target_sleeve:
+            if config.sleeve(asset) != target_sleeve or (only and config.symbol(asset) not in only):
                 continue
             if mid in (load_yaml(paths.strategy).get("migrations") or []):
                 continue
@@ -119,7 +121,7 @@ def apply_migrations(goal: dict, assets: list[str]) -> None:
             strategy["migrations"] = [*(strategy.get("migrations") or []), mid]
             dump_yaml(paths.strategy, strategy)
             print(f"Migration {mid} → {asset}: " + (", ".join(f"{r['variable']} {r['old_value']} → {r['new_value']}" for r in records) or "nothing to change"), flush=True)
-        if "crypto" in kinds and not target_sleeve:
+        if "crypto" in kinds and not target_sleeve and not only:
             template = load_yaml(config.STRATEGY_TEMPLATE)
             for key, value in changes.items():
                 reflect._set_path_creating(template, key, value)

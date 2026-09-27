@@ -129,12 +129,51 @@ def history(asset: str, tf: str, days: float) -> dict:
 # --- simulation ------------------------------------------------------------------------------
 
 
+FUNDING_DIR = config.ROOT / "cache" / "funding"
+FUNDING_SOURCES = ("binanceusdm", "okx", "bybit")  # Binance keeps years of history; OKX serves ~3 months
+
+
+def funding_history(asset: str, days: float, venue: str = "okx") -> list:
+    """Perpetual funding rates [[ms, rate], ...] for the last `days`, from cache/funding topped up
+    from an exchange that has them (the venue first). Binance's long history stands in for older
+    rates: its averages track OKX's within about 1%/year. [] when no exchange lists the perpetual."""
+    asset = config.symbol(asset)
+    path = FUNDING_DIR / f"{config.asset_slug(asset)}.json"
+    rows = json.loads(path.read_text()) if path.exists() else []
+    now, want_from = time.time() * 1000, time.time() * 1000 - days * 86400000
+    if not rows or rows[-1][0] < now - 8 * 3600000 * 2:
+        since = int(rows[-1][0] + 1) if rows else int(want_from)
+        for exchange_id in (venue, *[e for e in FUNDING_SOURCES if e != venue]):
+            try:
+                client = _clients.setdefault(exchange_id, getattr(ccxt, exchange_id)({"enableRateLimit": True}))
+                cursor, fresh = since, []
+                while cursor < now:
+                    page = [r for r in client.fetch_funding_rate_history(asset + ":USDT", since=cursor, limit=100)
+                            if r["timestamp"] >= cursor]
+                    if not page:
+                        break
+                    fresh += [[int(r["timestamp"]), float(r["fundingRate"])] for r in page]
+                    cursor = page[-1]["timestamp"] + 1
+            except Exception:  # not listed there, or geo-blocked
+                continue
+            if fresh:
+                rows = sorted({r[0]: r for r in rows + fresh}.values())
+                FUNDING_DIR.mkdir(parents=True, exist_ok=True)
+                atomic_write(path, json.dumps(rows))
+                break
+    return [r for r in rows if r[0] >= want_from]
+
+
 def _iso(ms: float) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: float, fee: float, slippage: float,
-             min_stop_frac: float = 0.0) -> dict:
+             min_stop_frac: float = 0.0, short_costs: tuple[float, float] | None = None,
+             funding=None, funded_sides: tuple[str, ...] = ("short",)) -> dict:
+    """`fee`/`slippage` apply to longs, `short_costs` (default the same) to shorts. `funding`:
+    [[ms, rate], ...] funding rates; positions on `funded_sides` pay rate x value at each one
+    (a short receives a positive rate), booked in the trade's P&L."""
     p = rules.params(strategy)
     tfe = rules.TF_SECONDS[p["timeframe"]] * 1000
     t, o, h, lo, c = (np.asarray(entry[k], dtype=float) for k in ("t", "open", "high", "low", "close"))
@@ -158,6 +197,14 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             if j >= 0 and not np.isnan(ema[j]):
                 trend_at[i] = bool(tc[j] > ema[j]) if p["direction"] == "long" else bool(tc[j] < ema[j])
 
+    side_costs = {"long": (fee, slippage), "short": short_costs or (fee, slippage)}
+    # funding paid by longs during each bar (a short receives it)
+    fund_bar = np.zeros(n)
+    if funding is not None and len(funding):
+        f = np.asarray(funding, dtype=float)
+        idx = np.searchsorted(t, f[:, 0], side="right") - 1
+        ok = (idx >= 0) & (idx < n)
+        np.add.at(fund_bar, idx[ok], f[ok, 1])
     equity, pos, trades, in_market = start_equity, None, [], 0
     pending_exit, pending_entry, blocked = None, None, None  # blocked: side stopped out, until the signal changes
 
@@ -167,11 +214,11 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
     def close_at(price: float, i_ms: float, reason: str) -> None:
         nonlocal equity, pos, blocked
         gross = sgn(pos["direction"]) * pos["qty"] * (price - pos["entry_price"])
-        fees = pos["fees"] + pos["qty"] * price * fee
-        pnl = gross - fees
+        fees = pos["fees"] + pos["qty"] * price * side_costs[pos["direction"]][0]
+        pnl = gross - fees + pos["funding"]
         trades.append({"opened_at": _iso(pos["opened_ms"]), "closed_at": _iso(i_ms), "direction": pos["direction"],
                        "entry_price": pos["entry_price"], "exit_price": price, "exit_reason": reason,
-                       "gross_pnl": gross, "fees": fees, "pnl": pnl, "pnl_pct": pnl / equity})
+                       "gross_pnl": gross, "fees": fees, "funding": pos["funding"], "pnl": pnl, "pnl_pct": pnl / equity})
         equity += pnl
         if reason == "stop_loss":
             blocked = pos["direction"]
@@ -185,17 +232,19 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
     for i in range(warmup, n):
         # 1) orders decided at the previous close fill at this bar's open (an exit, then maybe the flip)
         if pending_exit and pos:
-            close_at(rules.fill(o[i], exit_side(pos["direction"]), slippage), t[i], pending_exit)
+            close_at(rules.fill(o[i], exit_side(pos["direction"]), side_costs[pos["direction"]][1]), t[i], pending_exit)
         if pending_entry and not pos:
             side = pending_entry
-            fill_price = rules.fill(o[i], "buy" if side == "long" else "sell", slippage)
+            fill_price = rules.fill(o[i], "buy" if side == "long" else "sell", side_costs[side][1])
             dist = rules.stop_distance(p, fill_price, atr[i - 1], min_stop_frac)
             qty = rules.size(p, equity, fill_price, dist, rules.vol_scale(p, vols[i - 1]) if vols is not None else 1.0)
             stop, target = rules.levels(p, side, fill_price, dist)
             pos = {"direction": side, "entry_price": fill_price, "qty": qty, "stop": stop, "target": target,
-                   "opened_ms": t[i], "fees": qty * fill_price * fee}
+                   "opened_ms": t[i], "fees": qty * fill_price * side_costs[side][0], "funding": 0.0}
         pending_exit = pending_entry = None
-        # 2) stops and targets inside this bar
+        # 2) funding during this bar, then stops and targets inside it
+        if pos and pos["direction"] in funded_sides and fund_bar[i]:
+            pos["funding"] -= sgn(pos["direction"]) * pos["qty"] * c[i] * fund_bar[i]
         if pos:
             in_market += 1
             sign = sgn(pos["direction"])
@@ -203,15 +252,15 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             hit_target = h[i] >= pos["target"] if sign > 0 else lo[i] <= pos["target"]
             if hit_stop:
                 level = min(o[i], pos["stop"]) if sign > 0 else max(o[i], pos["stop"])
-                close_at(rules.fill(level, exit_side(pos["direction"]), slippage), t[i] + tfe, "stop_loss")
+                close_at(rules.fill(level, exit_side(pos["direction"]), side_costs[pos["direction"]][1]), t[i] + tfe, "stop_loss")
             elif hit_target:
                 level = max(o[i], pos["target"]) if sign > 0 else min(o[i], pos["target"])
-                close_at(rules.fill(level, exit_side(pos["direction"]), slippage), t[i] + tfe, "take_profit")
+                close_at(rules.fill(level, exit_side(pos["direction"]), side_costs[pos["direction"]][1]), t[i] + tfe, "take_profit")
         # Mark the portfolio to market after fills/stops for drawdown and time-series Sharpe.
         marked = equity
         if pos:
             gross = sgn(pos["direction"]) * pos["qty"] * (c[i] - pos["entry_price"])
-            marked += gross - pos["fees"] - pos["qty"] * c[i] * fee
+            marked += gross - pos["fees"] - pos["qty"] * c[i] * side_costs[pos["direction"]][0] + pos["funding"]
         equity_curve.append({"ts": _iso(t[i] + tfe), "equity": float(marked)})
 
         # 3) decisions at this bar's close
@@ -232,7 +281,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
             elif not pos and rules.entry_fires(p, rsi[i], trend_at[i]):
                 pending_entry = p["direction"]
     if pos:  # mark an open position to the last close, as a trade, so its loss or gain counts
-        close_at(rules.fill(c[-1], exit_side(pos["direction"]), slippage), t[-1] + tfe, "end_of_test")
+        close_at(rules.fill(c[-1], exit_side(pos["direction"]), side_costs[pos["direction"]][1]), t[-1] + tfe, "end_of_test")
         equity_curve.append({"ts": _iso(t[-1] + tfe), "equity": float(equity)})
     return {"trades": trades, "bars": n, "in_market_pct": in_market / max(1, n - warmup) * 100,
             "final_equity": equity, "start_equity": start_equity, "equity_curve": equity_curve}
@@ -267,9 +316,12 @@ def run(asset: str, strategy: dict, goal: dict, days: float = DEFAULT_DAYS) -> d
     if p["trend_filter"] != "off":
         warm = rules.TREND_BARS * rules.TF_SECONDS[p["trend_filter"]] / 86400
         trend = history(asset, p["trend_filter"], days + warm)
-    fee, slippage = rules.costs(goal, config.is_stock(asset))
+    stock = config.is_stock(asset)
+    fee, slippage = rules.costs(goal, stock, "long")
+    funded = tuple(side for side in ("long", "short") if rules.pays_funding(goal, stock, side))
+    rates = funding_history(asset, days + warm_days, rules.funding_venue(goal)) if funded and not stock else None
     sim = simulate(strategy, entry, trend, config.start_equity(asset, goal), fee, slippage,
-                   rules.min_stop_frac(goal, config.is_stock(asset)))
+                   rules.min_stop_frac(goal, stock), rules.costs(goal, stock, "short"), rates, funded)
     window_ms = entry["t"][-1] - days * 86400000
     split_ms = window_ms + (entry["t"][-1] - window_ms) * (1 - OOS_FRACTION)
     split = _iso(split_ms)

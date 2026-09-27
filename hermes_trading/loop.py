@@ -112,6 +112,9 @@ class AssetBook:
         self.symbol = config.symbol(asset)  # the market it trades
         self.start_equity = start_equity
         self.fee, self.slippage = costs  # fractions per side, applied to simulated fills
+        self.side_costs = {"long": costs, "short": costs}  # make_book sets the per-side model
+        self.funded_sides: tuple[str, ...] = ()  # sides held as perpetuals (they pay/receive funding)
+        self.funding_venue = "okx"
         self.min_stop_frac = 0.0  # closest a stop may be (set by make_book from goal.yaml costs)
         self.paths = config.ensure_asset_state(asset)
         self.breakers = {name: Breaker() for name in self.ADAPTERS}
@@ -210,10 +213,35 @@ class AssetBook:
             "atr_at_entry": sig.get("atr"),
             "trend_ok": sig.get("trend"),
             "ema_state": sig.get("state"),
-            "fees": round(qty * fill * self.fee, 6),  # entry side; the exit side is added on close
+            "fees": round(qty * fill * self.side_costs[side][0], 6),  # entry side; the exit side is added on close
+            "funding": 0.0,
             "context": self._context(data),
             **extra,
         }
+
+    async def _accrue_funding(self, last: float) -> None:
+        """A position on a perpetual pays (or receives) rate x value at every funding settlement
+        while it is open: longs pay a positive rate, shorts receive it. Booked in pos["funding"]."""
+        pos = self.paper["position"]
+        if not pos or pos["direction"] not in self.funded_sides:
+            return
+        if "funding" not in pos:  # opened before funding was modelled: count from now on
+            pos["funding"], pos["funding_until"] = 0.0, int(time.time() * 1000)
+            self._save_paper()
+            return
+        since = int(pos.get("funding_until") or pos.get("opened_ms") or 0) + 1
+        try:
+            rates = await price.funding(self.symbol, self.funding_venue, since)
+        except Exception as e:  # retried next tick; the settlement is not lost, only late
+            console.log(f"[yellow]{self.asset}: {e}")
+            return
+        if not rates:
+            return
+        sign = 1 if pos["direction"] == "long" else -1
+        paid = sum(sign * pos["qty"] * last * rate for _, rate in rates)
+        pos["funding"] = round(float(pos.get("funding", 0.0)) - paid, 6)
+        pos["funding_until"] = rates[-1][0]
+        self._save_paper()
 
     def _entry_size(self, sig: dict, price_now: float) -> float:
         dist = rules.stop_distance(sig["p"], price_now, sig.get("atr"), self.min_stop_frac)
@@ -223,8 +251,9 @@ class AssetBook:
         pos = self.paper["position"]
         sign = 1 if pos["direction"] == "long" else -1
         gross = sign * pos["qty"] * (exit_price - pos["entry_price"])
-        fees = pos.get("fees", 0.0) + pos["qty"] * exit_price * self.fee
-        pnl = gross - fees
+        fees = pos.get("fees", 0.0) + pos["qty"] * exit_price * self.side_costs[pos["direction"]][0]
+        funding = float(pos.get("funding", 0.0))
+        pnl = gross - fees + funding
         equity_before = self.paper["equity"]
         self.paper["equity"] = equity_before + pnl
         trade = {
@@ -236,6 +265,7 @@ class AssetBook:
             "rsi_at_exit": round(rsi_value, 2) if rsi_value is not None else None,
             "gross_pnl": round(gross, 4),
             "fees": round(fees, 4),
+            "funding": round(funding, 4),
             "pnl": round(pnl, 4),
             "pnl_pct": pnl / equity_before,
             "equity_after": round(self.paper["equity"], 4),
@@ -282,7 +312,7 @@ class AssetBook:
         if not reason:
             return None
         side = "sell" if pos["direction"] == "long" else "buy"
-        await self._record_close(rules.fill(last, side, self.slippage), reason, sig["rsi"])
+        await self._record_close(rules.fill(last, side, self.side_costs[pos["direction"]][1]), reason, sig["rsi"])
         if reason == "stop_loss":
             self.paper["blocked"] = pos["direction"]
             self._save_paper()
@@ -301,7 +331,7 @@ class AssetBook:
         side, why = self._entry_side(sig)
         if not side:
             return closed or why
-        fill_price = rules.fill(last, "buy" if side == "long" else "sell", self.slippage)
+        fill_price = rules.fill(last, "buy" if side == "long" else "sell", self.side_costs[side][1])
         qty = self._entry_size(sig, fill_price)
         blocked = self._risk_block(qty * fill_price)
         if blocked:
@@ -336,6 +366,7 @@ class AssetBook:
                     summary["decision"] = "skip: no price data"
                 else:
                     sig = await self.signals(strategy)
+                    await self._accrue_funding(price_data["last"])
                     summary.update(
                         last_price=price_data["last"],
                         price_source=price_data["source"],
@@ -376,7 +407,7 @@ class AssetBook:
 
     async def _manual_sell(self, pos: dict) -> str:
         last, rsi_value = await self._quote()
-        exit_fill = rules.fill(last, "sell" if pos["direction"] == "long" else "buy", self.slippage)
+        exit_fill = rules.fill(last, "sell" if pos["direction"] == "long" else "buy", self.side_costs[pos["direction"]][1])
         await self._record_close(exit_fill, "manual_close", rsi_value)
         return f"{pos['direction']} cerrado a {exit_fill:g} (ejecución simulada, con comisión)"
 
@@ -410,7 +441,7 @@ class AssetBook:
     async def _manual_buy(self, strategy: dict, sig: dict) -> str:
         last, _ = await self._quote()
         side = sig.get("target") or ("long" if sig["p"]["direction"] == "both" else sig["p"]["direction"])
-        fill_price = rules.fill(last, "buy" if side == "long" else "sell", self.slippage)
+        fill_price = rules.fill(last, "buy" if side == "long" else "sell", self.side_costs[side][1])
         self.paper["position"] = self._position(strategy, fill_price, self._entry_size(sig, fill_price), sig, {}, side, manual=True)
         self._save_paper()
         return f"{side} abierto a {fill_price:g} (ejecución simulada, con comisión)"
@@ -551,6 +582,10 @@ def make_book(asset: str, goal: dict) -> AssetBook:
     # Stocks fill at Alpaca (real prices, commission-free), so only crypto gets simulated costs
     costs = rules.costs(goal, stock) if not stock else (0.0, 0.0)
     book = StockBook(asset, equity, costs) if stock else AssetBook(asset, equity, costs)
+    if not stock:
+        book.side_costs = {side: rules.costs(goal, stock, side) for side in ("long", "short")}
+        book.funded_sides = tuple(side for side in ("long", "short") if rules.pays_funding(goal, stock, side))
+        book.funding_venue = rules.funding_venue(goal)
     book.min_stop_frac = rules.min_stop_frac(goal, stock)
     return book
 
@@ -608,7 +643,7 @@ class Worker:
             if pos:
                 price_now = last if last is not None else pos["entry_price"]
                 sign = 1 if pos["direction"] == "long" else -1
-                agg["unrealized"] += sign * pos["qty"] * (price_now - pos["entry_price"])
+                agg["unrealized"] += sign * pos["qty"] * (price_now - pos["entry_price"]) + pos.get("funding", 0.0)
                 agg["invested"] += pos["qty"] * price_now
                 agg["open"] += 1
         record = {"ts": utcnow(), **{k: {f: round(v, 4) for f, v in agg.items()} for k, agg in kinds.items()}}

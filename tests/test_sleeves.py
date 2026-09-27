@@ -33,6 +33,10 @@ strategy_migrations:
     kinds: [crypto]
     sleeve: momentum
     changes: {entry.lookback: 90}
+  - id: other-pair-only
+    kinds: [crypto]
+    assets: ["ETH/USDT"]
+    changes: {entry.direction: long}
 """
 
 
@@ -75,6 +79,10 @@ class BootTests(unittest.TestCase):
         sleeve = load_yaml(config.asset_paths("BTC/USDT@momentum").strategy)
         self.assertEqual(main["entry"]["indicator"], "ema_cross")
         self.assertEqual(main["stop_atr_mult"], 4.0)            # main-only migration
+        self.assertEqual(main["entry"]["direction"], "both")     # migration limited to another pair
+        self.assertNotIn("other-pair-only", main["migrations"])
+        template = load_yaml(config.STRATEGY_TEMPLATE_CRYPTO)
+        self.assertEqual((template["entry"]["direction"], template["migrations"]), ("both", ["main-only"]))
         self.assertEqual(sleeve["entry"]["indicator"], "tsmom")
         self.assertEqual(sleeve["entry"]["lookback"], 90)       # sleeve-only migration
         self.assertEqual(sleeve["stop_atr_mult"], 3.0)          # untouched by the main migration

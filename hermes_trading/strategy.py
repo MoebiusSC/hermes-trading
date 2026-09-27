@@ -128,11 +128,29 @@ def bars_needed(p: dict) -> int:
     return max(ENTRY_BARS, need)
 
 
-def costs(goal: dict, stock: bool) -> tuple[float, float]:
-    """(fee, slippage) as fractions per side, from goal.yaml `costs:` or the defaults."""
+def _cost_spec(goal: dict, stock: bool, side: str) -> dict:
+    """goal.yaml `costs.<kind>`: flat {fee_pct, slippage_pct}, or per side of the book
+    {long: {...}, short: {..., funding: true}} (e.g. longs on spot, shorts on a perpetual)."""
     kind = "stock" if stock else "crypto"
-    c = {**DEFAULT_COSTS[kind], **((goal.get("costs") or {}).get(kind) or {})}
+    c = (goal.get("costs") or {}).get(kind) or {}
+    if side in c and isinstance(c[side], dict):
+        c = c[side]
+    return {**DEFAULT_COSTS[kind], **{k: v for k, v in c.items() if not isinstance(v, dict)}}
+
+
+def costs(goal: dict, stock: bool, side: str = "long") -> tuple[float, float]:
+    """(fee, slippage) as fractions per side of a trade, for a long or a short position."""
+    c = _cost_spec(goal, stock, side)
     return float(c["fee_pct"]) / 100, float(c["slippage_pct"]) / 100
+
+
+def pays_funding(goal: dict, stock: bool, side: str) -> bool:
+    """Whether positions on this side are perpetual futures that pay/receive the funding rate."""
+    return bool(_cost_spec(goal, stock, side).get("funding", False))
+
+
+def funding_venue(goal: dict) -> str:
+    return str(((goal.get("costs") or {}).get("crypto") or {}).get("venue", "okx"))
 
 
 def min_stop_frac(goal: dict, stock: bool) -> float:

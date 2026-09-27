@@ -41,7 +41,10 @@ failure_below:     -0.04     # score floor — steeply negative below this
 reflection_every:  10        # cycle cadence (per asset): closed trades between reflections
 one_variable_only: true      # scientific-method guardrail
 costs:                       # % per side on simulated fills (stocks fill at Alpaca: real prices, no commission)
-  crypto: {fee_pct: 0.1, slippage_pct: 0.02}
+  crypto:                    # OKX, regular (VIP 0) taker fees
+    venue: okx
+    long: {fee_pct: 0.1, slippage_pct: 0.02}                  # spot
+    short: {fee_pct: 0.05, slippage_pct: 0.02, funding: true}  # USDT perpetual: pays/receives funding
   min_stop_x_costs: 3        # a stop is never closer than 3x the round-trip cost
 risk:                        # portfolio limits checked before every automatic entry
   max_open_positions: 31     # always-in-market strategies: one position per pair and sleeve, plus ETFs
@@ -92,6 +95,15 @@ strategy_migrations:         # named one-off changes, applied once per asset at 
       junto con la sub-cuenta de momentum, la combinación EMA 50/200 con stop de 5 ATR tuvo el mejor
       Sharpe de 5 años (0,98) de 650 combinaciones, dentro de una meseta de configuraciones parecidas
       (0,93-0,98), no un pico aislado.
+  - id: paxg-long-only-v1
+    kinds: [crypto]
+    assets: ["PAXG/USDT"]
+    changes:
+      entry.direction: long
+    note: >-
+      PAXG solo en largo: los shorts se simulan ahora como perpetuos de OKX (comisión 0,05% y funding) y
+      OKX no lista un perpetuo de PAXG, así que un short no sería ejecutable. El short abierto se cierra
+      en el primer ciclo tras el despliegue (signal_exit).
 sleeves:                     # extra strategies per pair, each with its own simulated account (asset@sleeve)
   momentum:
     kinds: [crypto]

@@ -655,7 +655,8 @@ function lastPrice(a) {
 function unrealized(a) {
   const p = a.paper.position, last = lastPrice(a);
   if (!p || last == null) return 0;
-  return (p.direction === "long" ? 1 : -1) * p.qty * (last - p.entry_price);
+  // funding: what a position on a perpetual has received (+) or paid (−) so far
+  return (p.direction === "long" ? 1 : -1) * p.qty * (last - p.entry_price) + (p.funding || 0);
 }
 const scopeAssets = (scope) => state.assets.filter((a) => scope === "all" || a.kind === scope);
 function totals(assets) {
@@ -687,6 +688,7 @@ function tradeStats(trades) {
     avgDuration: n ? trades.reduce((s, t) => s + (Date.parse(t.closed_at) - Date.parse(t.opened_at)), 0) / n : null,
     best: byPct[0], worst: byPct[n - 1],
     fees: trades.reduce((s, t) => s + (t.fees || 0), 0),
+    funding: trades.reduce((s, t) => s + (t.funding || 0), 0),
   };
 }
 // Buy & hold from the asset's first entry, marked to the live price (long, whatever the strategy's side).
@@ -1166,6 +1168,7 @@ function renderQuality() {
     ["Esperanza por operación", (s) => (s.expectancy == null ? "—" : { text: `${signedUsd(s.expectancy)} (${pct(s.expectancyPct, 3)})`, cls: signCls(s.expectancy) })],
     ["Duración media", (s) => durationFmt(s.avgDuration)],
     ["Comisiones y slippage", (s) => (s.fees ? { text: signedUsd(-s.fees), cls: "down" } : "—")],
+    ["Funding (neto)", (s) => (s.funding ? { text: signedUsd(s.funding), cls: signCls(s.funding) } : "—")],
     ["Mejor operación", (s) => (s.best ? `${short(s.best.asset)} ${pct(s.best.pnl_pct * 100)}` : "—")],
     ["Peor operación", (s) => (s.worst ? `${short(s.worst.asset)} ${pct(s.worst.pnl_pct * 100)}` : "—")],
   ];
@@ -1626,9 +1629,10 @@ function renderDetail() {
     height: 170, yDomain: [0, 100], refs: rsiRefs, label: `${a.asset} RSI`, yFmt: (v) => v.toFixed(0),
     tooltipFmt: (v) => v.toFixed(1), emptyText: "Cargando velas en vivo…",
   });
-  table(document.getElementById("trades-table"), ["Apertura", "Cierre", "Lado", "Entrada", "Salida", "Motivo", "Comisión", "P&L neto"],
+  table(document.getElementById("trades-table"), ["Apertura", "Cierre", "Lado", "Entrada", "Salida", "Motivo", "Comisión", "Funding", "P&L neto"],
     a.trades.slice().reverse().map((t) => [dateTimeFmt(Date.parse(t.opened_at)), dateTimeFmt(Date.parse(t.closed_at)), t.direction,
       priceFmt(t.entry_price), priceFmt(t.exit_price), reasonEs(t.exit_reason), t.fees != null ? usd(t.fees) : "sin simular",
+      t.funding ? { text: signedUsd(t.funding), cls: signCls(t.funding) } : "—",
       { text: `${signedUsd(t.pnl)} (${pct(t.pnl_pct * 100, 3)})`, cls: signCls(t.pnl) }]), { empty: "Aún sin operaciones cerradas." });
 
   document.getElementById("strategy-title").textContent = strat ? `Estrategia v${strat.version} · ${assetLabel(a.asset)}` : "Estrategia";
