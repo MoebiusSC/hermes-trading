@@ -115,9 +115,17 @@ class Alpaca:
         # bars exist only in market hours (~1/5 of the calendar), so reach back far enough for `limit`
         days = max(days, int(limit * TF_SECONDS[tf] / 86400 * 5) + 5)
         start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
-        data = await self._req("GET", f"{DATA_URL}/v2/stocks/{symbol}/bars",
-                               params={"timeframe": timeframe, "limit": limit, "feed": self.feed, "sort": "desc", "start": start})
-        bars = (data.get("bars") or [])[::-1]
+        # Alpaca serves intraday history in ~2-week pages, so follow them until `limit` bars. Adjusted
+        # for splits and dividends: a 10:1 split would otherwise look like a 90% crash to the signals.
+        params = {"timeframe": timeframe, "limit": limit, "feed": self.feed, "sort": "desc", "start": start, "adjustment": "all"}
+        bars: list = []
+        while len(bars) < limit:
+            data = await self._req("GET", f"{DATA_URL}/v2/stocks/{symbol}/bars", params=params)
+            bars += data.get("bars") or []
+            if not data.get("next_page_token"):
+                break
+            params = {**params, "page_token": data["next_page_token"], "limit": limit - len(bars)}
+        bars = bars[:limit][::-1]
         candles = {"t": [int(_parse_ts(b["t"]).timestamp() * 1000) for b in bars], "open": [float(b["o"]) for b in bars],
                    "high": [float(b["h"]) for b in bars], "low": [float(b["l"]) for b in bars], "close": [float(b["c"]) for b in bars]}
         cache[key] = (time.monotonic(), candles)

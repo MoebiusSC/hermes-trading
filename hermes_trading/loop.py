@@ -172,6 +172,8 @@ class AssetBook:
         """RSI, ATR, the EMA cross and the trend filter on the strategy's timeframe, from closed candles."""
         p = rules.params(strategy)
         candles = rules.closed(await self.OHLCV(self.symbol, p["timeframe"], rules.bars_needed(p) + 1), p["timeframe"])
+        if config.is_stock(self.asset):  # consolidated-tape bad prints would inflate the ATR
+            candles = rules.clip_wicks(candles, rules.stock_max_wick(p["timeframe"]))
         if len(candles["close"]) < rules.RSI_PERIOD + 2:
             raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles")
         rsi_now = float(rules.rsi_series(candles["close"])[-1])
@@ -188,7 +190,7 @@ class AssetBook:
                 raise RuntimeError(f"only {len(candles['close'])} closed {p['timeframe']} candles for {p['indicator']}")
             target = rules.target_direction(p, state)
             if p["target_vol"] > 0:
-                scale = rules.vol_scale(p, rules.realized_vol_series(candles["close"], p["timeframe"])[-1])
+                scale = rules.vol_scale(p, rules.realized_vol_series(candles["close"], p["timeframe"], t=candles["t"])[-1])
         return {"p": p, "rsi": round(rsi_now, 4), "atr": None if np.isnan(atr_now) else atr_now, "trend": trend,
                 "state": state, "target": target, "vol_scale": scale}
 

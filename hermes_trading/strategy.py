@@ -218,6 +218,27 @@ def closed(candles: dict, tf: str, now_ms: float | None = None) -> dict:
     return candles
 
 
+def clip_wicks(candles: dict, max_frac: float) -> dict:
+    """Bad prints: a high or low more than `max_frac` beyond the bar's open, close and the previous
+    close is cut back to that range (SPY's 2 Feb 2026 daily bar has a low of 68 with SPY near 690).
+    Such wicks would trigger simulated stops that never happened."""
+    o, h, lo, c = (np.asarray(candles[k], dtype=float) for k in ("open", "high", "low", "close"))
+    if len(c) < 2:
+        return candles
+    prev = np.concatenate([[c[0]], c[:-1]])
+    top, bottom = np.maximum.reduce([o, c, prev]), np.minimum.reduce([o, c, prev])
+    h = np.where(h > top * (1 + max_frac), np.maximum(o, c), h)
+    lo = np.where(lo < bottom * (1 - max_frac), np.minimum(o, c), lo)
+    return {**candles, "high": h.tolist(), "low": lo.tolist()}
+
+
+STOCK_MAX_WICK = {"1d": 0.2}  # beyond the bar's open, close and previous close; intraday: 8%
+
+
+def stock_max_wick(tf: str) -> float:
+    return STOCK_MAX_WICK.get(tf, 0.08)
+
+
 # --- rules ---------------------------------------------------------------------------------
 
 
@@ -271,14 +292,17 @@ def signal_state(p: dict, closes) -> int | None:
     return int(states[-1]) if len(states) and states[-1] != 0 else None
 
 
-def realized_vol_series(closes, tf: str, n: int = VOL_BARS) -> np.ndarray:
-    """Annualised volatility of the last n candle returns, at every candle (NaN before)."""
+def realized_vol_series(closes, tf: str, n: int = VOL_BARS, t=None) -> np.ndarray:
+    """Annualised volatility of the last n candle returns, at every candle (NaN before). With the
+    candle times `t`, candles per year are counted from them: a stock trades ~252 days a year, not 365."""
     c = np.asarray(closes, dtype=float)
     out = np.full(len(c), np.nan)
     if len(c) <= n:
         return out
     r = np.diff(c) / c[:-1]
     per_year = 365 * 86400 / TF_SECONDS[tf]
+    if t is not None and len(t) > 1 and t[-1] > t[0]:
+        per_year = min(per_year, (len(t) - 1) / ((t[-1] - t[0]) / (365 * 86400000)))
     for i in range(n, len(c)):
         out[i] = float(np.std(r[i - n:i], ddof=1)) * np.sqrt(per_year)
     return out

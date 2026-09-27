@@ -74,6 +74,7 @@ def _columns(rows: list) -> dict:
             "low": [float(r[3]) for r in rows], "close": [float(r[4]) for r in rows]}
 
 
+STOCK_SOURCE = "alpaca-adjusted"  # caches from before split adjustment ("alpaca") are fetched again
 _ALPACA_TF = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "4h": "4Hour", "1d": "1Day"}
 
 
@@ -84,7 +85,8 @@ def _fetch_stock(symbol: str, tf: str, since_ms: int) -> dict:
     rows, token = [], None
     start = dt.datetime.fromtimestamp(since_ms / 1000, dt.timezone.utc).isoformat()
     while True:
-        params = {"timeframe": _ALPACA_TF[tf], "limit": 10000, "feed": config.env("ALPACA_DATA_FEED", "iex"), "start": start}
+        params = {"timeframe": _ALPACA_TF[tf], "limit": 10000, "feed": config.env("ALPACA_DATA_FEED", "iex"), "start": start,
+                  "adjustment": "all"}  # split- and dividend-adjusted, like the live bars
         if token:
             params["page_token"] = token
         r = httpx.get(f"https://data.alpaca.markets/v2/stocks/{symbol}/bars", params=params, timeout=30,
@@ -97,7 +99,7 @@ def _fetch_stock(symbol: str, tf: str, since_ms: int) -> dict:
         token = data.get("next_page_token")
         if not token:
             break
-    return {"source": "alpaca", **_columns(rows)}
+    return {"source": STOCK_SOURCE, **_columns(rows)}
 
 
 def history(asset: str, tf: str, days: float) -> dict:
@@ -108,6 +110,8 @@ def history(asset: str, tf: str, days: float) -> dict:
     now = time.time() * 1000
     want_from = now - days * 86400000
     cached = json.loads(path.read_text()) if path.exists() else None
+    if cached and config.is_stock(asset) and cached.get("source") != STOCK_SOURCE:
+        cached = None
     if cached and cached["t"] and cached["t"][0] <= want_from + rules.TF_SECONDS[tf] * 1000 * 2:
         since = cached["t"][-1] + rules.TF_SECONDS[tf] * 1000
         fresh = (_fetch_stock if config.is_stock(asset) else _fetch_crypto)(asset, tf, int(since)) if since < now else None
@@ -123,7 +127,8 @@ def history(asset: str, tf: str, days: float) -> dict:
     atomic_write(path, json.dumps(data))
     data = rules.closed({k: data[k] for k in ("t", "open", "high", "low", "close")}, tf, now) | {"source": data.get("source")}
     keep = [i for i, t in enumerate(data["t"]) if t >= want_from]
-    return {k: ([data[k][i] for i in keep] if isinstance(data[k], list) else data[k]) for k in data}
+    data = {k: ([data[k][i] for i in keep] if isinstance(data[k], list) else data[k]) for k in data}
+    return rules.clip_wicks(data, rules.stock_max_wick(tf)) if config.is_stock(asset) else data
 
 
 # --- simulation ------------------------------------------------------------------------------
@@ -182,7 +187,7 @@ def simulate(strategy: dict, entry: dict, trend: dict | None, start_equity: floa
     rsi = rules.rsi_series(c)
     atr = rules.atr_series(h, lo, c)
     states = rules.signal_states(p, c) if ema_mode else None
-    vols = rules.realized_vol_series(c, p["timeframe"]) if p["target_vol"] > 0 else None
+    vols = rules.realized_vol_series(c, p["timeframe"], t=t) if p["target_vol"] > 0 else None
     # trend at each entry bar's close: the last trend bar that had closed by then
     trend_at = [None] * n
     if not ema_mode and p["trend_filter"] != "off" and trend and trend["t"]:
@@ -309,6 +314,8 @@ def run(asset: str, strategy: dict, goal: dict, days: float = DEFAULT_DAYS) -> d
     p = rules.params(strategy)
     # extra history before the window so slow indicators are settled when it starts
     warm_days = rules.bars_needed(p) * rules.TF_SECONDS[p["timeframe"]] / 86400
+    if config.is_stock(asset):  # bars only on weekdays, and intraday ones only in (extended) market hours
+        warm_days *= 7 / 5 * (1 if p["timeframe"] == "1d" else 24 / 16)
     entry = history(asset, p["timeframe"], days + warm_days)
     if len(entry["t"]) < 100:
         raise RuntimeError(f"only {len(entry['t'])} {p['timeframe']} candles of history for {asset}")
