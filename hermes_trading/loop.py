@@ -611,10 +611,10 @@ class Worker:
         self._issues: dict[str, str | None] = {}  # asset -> the issue last logged, so each is logged once
         self._last_snapshot = float("-inf")  # first snapshot on the first tick
         self.reflect_every_s = float(REFLECT_EVERY_S)
-        spec = rotation.settings(goal)
-        self.rotation = rotation.RotationBook(spec) if spec else None  # monthly stock rotation, its own account
-        if self.rotation:
-            self.rotation.exclude = {config.symbol(b.asset) for b in self.books if config.is_stock(b.asset)}
+        # monthly stock rotations (US, Europe...), each its own account
+        self.rotations = [rotation.RotationBook(spec, name=name) for name, spec in rotation.all_settings(goal).items()]
+        for rot in self.rotations:
+            rot.exclude = {config.symbol(b.asset) for b in self.books if config.is_stock(b.asset)}
 
     # --- dashboard records ---------------------------------------------------
 
@@ -659,13 +659,13 @@ class Worker:
                 agg["unrealized"] += sign * pos["qty"] * (price_now - pos["entry_price"]) + pos.get("funding", 0.0)
                 agg["invested"] += pos["qty"] * price_now
                 agg["open"] += 1
-        if self.rotation:
+        for rot in self.rotations:
             agg = kinds["stock"]
-            agg["start"] += self.rotation.start_equity
-            agg["realized"] += float(self.rotation.paper["equity"])
-            agg["unrealized"] += self.rotation.unrealized()
-            agg["invested"] += self.rotation.invested()
-            agg["open"] += len(self.rotation.paper["positions"])
+            agg["start"] += rot.start_equity
+            agg["realized"] += float(rot.paper["equity"])
+            agg["unrealized"] += rot.unrealized()
+            agg["invested"] += rot.invested()
+            agg["open"] += len(rot.paper["positions"])
         record = {"ts": utcnow(), **{k: {f: round(v, 4) for f, v in agg.items()} for k, agg in kinds.items()}}
         try:
             append_jsonl(config.EQUITY_FILE, record)
@@ -738,8 +738,9 @@ class Worker:
         book = make_book(asset, load_yaml(config.GOAL_FILE))
         book.worker = self
         self.books.append(book)
-        if self.rotation and config.is_stock(asset):
-            self.rotation.exclude.add(config.symbol(asset))  # one owner per Alpaca position
+        if config.is_stock(asset):
+            for rot in self.rotations:
+                rot.exclude.add(config.symbol(asset))  # one owner per Alpaca position
         message = f"{asset} añadido con una cuenta simulada de ${book.start_equity:,.0f}".replace(",", ".")
         self.event("asset_added", message, asset)
         if buy:
@@ -809,18 +810,20 @@ class Worker:
             return None
         return mode, float(config.env("HERMES_REFLECT_EVERY_S", str(REFLECT_EVERY_S)))
 
+    async def _tick_rotations(self) -> list[dict]:
+        # one after the other: they share Alpaca's cash, and two reading it at once could spend it twice
+        return [await rot.tick() for rot in self.rotations]
+
     async def tick(self) -> None:
-        rotating = [self.rotation.tick()] if self.rotation else []
-        *summaries, = await asyncio.gather(*(book.tick() for book in self.books), *rotating)
-        rot = summaries.pop() if rotating else None
+        *summaries, rots = await asyncio.gather(*(book.tick() for book in self.books), self._tick_rotations())
         by_asset = {book.asset: s for book, s in zip(self.books, summaries)}
-        self._heartbeat("running", by_asset, **({"rotation": rot} if rot else {}))
-        if rot:
-            self._log_issue("rotación", rot)
+        self._heartbeat("running", by_asset, **({"rotations": {r.asset: s for r, s in zip(self.rotations, rots)}} if rots else {}))
+        for book, rot in zip(self.rotations, rots):
+            self._log_issue(book.label, rot)
             if rot["decision"].startswith(("rebalanced", "bought")):
-                self.event("rotation", rot["decision"][:400], "rotación")
+                self.event("rotation", rot["decision"][:400], book.label)
             if rot.get("market") != "closed":
-                console.log(f"rotation value={rot['value']:.2f} → {rot['decision']}")
+                console.log(f"{book.asset} value={rot['value']:.2f} → {rot['decision']}")
         for asset, s in by_asset.items():
             if s.get("last_price") is not None:
                 self.last_prices[asset] = s["last_price"]

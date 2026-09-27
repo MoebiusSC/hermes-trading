@@ -28,6 +28,7 @@ import pandas as pd
 
 from . import config, reflect, remote
 from .loop import RSI_PERIOD
+from .rotation import all_settings as rotation_settings
 from .score import metrics, score
 from .storage import load_yaml, read_jsonl
 
@@ -138,22 +139,29 @@ def build_state(state_dir: Path = DASH_DIR, hosted: bool = False) -> dict:
                 "tick": (heartbeat.get("assets") or {}).get(asset),
             }
         )
-    rotation = None
-    if (goal.get("rotation") or {}).get("enabled", True) and goal.get("rotation"):
-        root = state_dir / "rotation"
-        spec = goal["rotation"]
-        rotation = {
+    rotations = []
+    try:
+        specs = rotation_settings(goal)
+    except ValueError:
+        specs = {}  # the worker refuses such a goal too; show the rest of the dashboard
+    ticks = heartbeat.get("rotations") or {"rotation": heartbeat.get("rotation")}  # older workers: one rotation
+    for name, spec in specs.items():
+        root = state_dir / name
+        capital = float(spec["capital"])
+        rotations.append({
+            "name": name,
+            "label": spec["label"],
             "settings": spec,
-            "paper": _read_json(root / "paper_account.json") or {"start_equity": float(spec.get("capital", 0)), "cash": float(spec.get("capital", 0)),
-                                                                  "equity": float(spec.get("capital", 0)), "positions": {}, "picks": [], "pending": []},
+            "paper": _read_json(root / "paper_account.json") or {"start_equity": capital, "cash": capital, "equity": capital,
+                                                                  "positions": {}, "picks": [], "pending": []},
             "trades": read_jsonl(root / "trades.jsonl"),
             "rankings": read_jsonl(root / "rankings.jsonl")[-12:],
-            "tick": heartbeat.get("rotation"),
-        }
+            "tick": ticks.get(name),
+        })
     return {
         "ready": True,
         "goal": goal,
-        "rotation": rotation,
+        "rotations": rotations,
         "worker": {k: v for k, v in heartbeat.items() if k != "assets"},
         "pulled_at": pulled_at,
         "assets": assets,

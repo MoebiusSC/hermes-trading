@@ -463,6 +463,7 @@ footer { margin-top: 24px; color: var(--text-muted); font-size: 12px; }
     <section id="tab-rotacion" role="tabpanel" hidden>
       <section class="panel">
         <h2>Rotación mensual de acciones</h2>
+        <div class="seg" id="rot-seg" role="group" aria-label="Rotación" hidden></div>
         <div class="sub" id="rot-sub"></div>
         <div class="kpis" id="rot-kpis"></div>
         <div class="insight" id="rot-decision"></div>
@@ -698,20 +699,21 @@ function unrealized(a) {
   return (p.direction === "long" ? 1 : -1) * p.qty * (last - p.entry_price) + (p.funding || 0);
 }
 const scopeAssets = (scope) => state.assets.filter((a) => scope === "all" || a.kind === scope);
-// The rotation's account (rotation.py): one account holding several stocks
-const rotPositions = () => (state.rotation ? Object.entries(state.rotation.paper.positions || {}) : []);
+// The rotations' accounts (rotation.py): each one account holding several stocks. [sym, position, rotation]
+const rotPositions = (rots = state.rotations || []) => rots.flatMap((r) => Object.entries(r.paper.positions || {}).map(([sym, p]) => [sym, p, r]));
 const rotPrice = (p) => p.last_price ?? p.entry_price;
-const rotUnrealized = () => rotPositions().reduce((s, [, p]) => s + p.qty * (rotPrice(p) - p.entry_price), 0);
-const rotInvested = () => rotPositions().reduce((s, [, p]) => s + p.qty * rotPrice(p), 0);
+const rotUnrealized = (rots) => rotPositions(rots).reduce((s, [, p]) => s + p.qty * (rotPrice(p) - p.entry_price), 0);
+const rotInvested = (rots) => rotPositions(rots).reduce((s, [, p]) => s + p.qty * rotPrice(p), 0);
 function totals(assets, withRotation = assets.some((a) => a.kind === "stock")) {
   const t = { start: 0, realized: 0, unreal: 0, invested: 0, open: 0, long: 0, short: 0, stopRisk: 0, biggest: null };
-  if (withRotation && state.rotation) {
-    const rp = state.rotation.paper, n = rotPositions().length;
-    t.start += rp.start_equity; t.realized += rp.equity; t.unreal += rotUnrealized(); t.invested += rotInvested();
+  if (withRotation && (state.rotations || []).length) {
+    const n = rotPositions().length;
+    for (const r of state.rotations) { t.start += r.paper.start_equity; t.realized += r.paper.equity; }
+    t.unreal += rotUnrealized(); t.invested += rotInvested();
     t.open += n; t.long += n;
-    for (const [sym, p] of rotPositions()) {
+    for (const [sym, p, r] of rotPositions()) {
       const value = p.qty * rotPrice(p);
-      if (!t.biggest || value > t.biggest.value) t.biggest = { asset: `${sym} (rotación)`, value };
+      if (!t.biggest || value > t.biggest.value) t.biggest = { asset: `${sym} (rotación ${r.label})`, value };
     }
   }
   for (const a of assets) {
@@ -1495,10 +1497,10 @@ function renderPositions() {
       priceFmt(pos.stop), priceFmt(pos.target), last != null ? usd(pos.qty * last) : "—",
       `${((pos.qty * pos.entry_price) / a.paper.equity * 100).toFixed(0)}%`,
       { text: signedUsd(u), cls: signCls(u) }, { node: btn, cls: "act" }];
-  }).concat(rotPositions().map(([sym, p]) => {
+  }).concat(rotPositions().map(([sym, p, r]) => {
     const u = p.qty * (rotPrice(p) - p.entry_price);
-    return [{ text: `${sym} · rotación · long`, cls: "wrap" }, priceFmt(p.entry_price), priceFmt(rotPrice(p)), "—", "—", usd(p.qty * rotPrice(p)),
-      `${((p.qty * p.entry_price) / state.rotation.paper.equity * 100).toFixed(0)}%`, { text: signedUsd(u), cls: signCls(u) },
+    return [{ text: `${sym} · rotación ${r.label} · long`, cls: "wrap" }, priceFmt(p.entry_price), priceFmt(rotPrice(p)), "—", "—", usd(p.qty * rotPrice(p)),
+      `${((p.qty * p.entry_price) / r.paper.equity * 100).toFixed(0)}%`, { text: signedUsd(u), cls: signCls(u) },
       { text: "mensual", cls: "act muted" }];
   })), { empty: "Sin posiciones abiertas." });
 }
@@ -1514,20 +1516,29 @@ function nextRebalance(last) {
   return d;
 }
 function renderRotacion() {
-  const r = state.rotation;
+  const rots = state.rotations || [];
+  const r = rots.find((x) => x.name === ui.rot) || rots[0];
+  const seg = document.getElementById("rot-seg");
+  seg.hidden = rots.length < 2;
+  seg.replaceChildren(...rots.map((x) => {
+    const b = el("button", { type: "button", "data-rot": x.name }, x.label);
+    b.addEventListener("click", () => { ui.rot = x.name; saveUi(); render(); });
+    return b;
+  }));
   const sub = document.getElementById("rot-sub");
   if (!r) {
-    sub.textContent = "Desactivada: se configura en goal.yaml (rotation).";
+    sub.textContent = "Desactivada: se configura en goal.yaml (rotation, rotations).";
     for (const id of ["rot-kpis", "rot-decision", "rot-positions", "rot-ranking", "rot-trades"]) document.getElementById(id).replaceChildren();
     return;
   }
+  segSync("rot-seg", "rot", r.name);
   const s = r.settings, rp = r.paper, tick = r.tick || {};
-  const value = rp.cash + rotInvested(), ret = (value / rp.start_equity - 1) * 100;
-  sub.textContent = `Cada mes, el primer día hábil (${s.after_open_min ?? 30} min después de la apertura), compra las ${s.top ?? 5} acciones de su universo (${(s.universe || []).length}) con mejor retorno de 12 meses sin el último mes, a partes iguales, y vende las que salen del top.`;
+  const value = rp.cash + rotInvested([r]), ret = (value / rp.start_equity - 1) * 100;
+  sub.textContent = `${r.label}: cada mes, el primer día hábil (${s.after_open_min ?? 30} min después de la apertura), compra las ${s.top ?? 5} acciones de su universo (${(s.universe || []).length}) con mejor retorno de 12 meses sin el último mes, a partes iguales, y vende las que salen del top.`;
   const next = nextRebalance(rp.last_rebalance);
   document.getElementById("rot-kpis").replaceChildren(
     kpi("Valor de la cuenta", usd(value), signCls(ret), `${pct(ret)} sobre ${usd(rp.start_equity, 0)}`),
-    kpi("No realizado", signedUsd(rotUnrealized()), signCls(rotUnrealized())),
+    kpi("No realizado", signedUsd(rotUnrealized([r])), signCls(rotUnrealized([r]))),
     kpi("Realizado", signedUsd(rp.equity - rp.start_equity), signCls(rp.equity - rp.start_equity), `${r.trades.length} ${r.trades.length === 1 ? "posición cerrada" : "posiciones cerradas"}`),
     kpi("Efectivo", usd(rp.cash), "", (rp.pending || []).length ? `pendiente de comprar: ${rp.pending.join(", ")}` : ""),
     kpi("Próximo rebalanceo", next.toLocaleDateString([], { day: "numeric", month: "short" }), "", rp.last_rebalance ? `último: ${rp.last_rebalance}` : "aún no rebalanceó"),
@@ -1536,7 +1547,7 @@ function renderRotacion() {
   decision.textContent = tick.error ? `Error: ${tick.error}` : tick.decision ? `Worker: ${decisionEs(tick.decision)}` : "";
   const picks = new Set(rp.picks || []);
   table(document.getElementById("rot-positions"), ["Acción", "Cantidad", "Entrada", "Ahora", "Valor", "Peso", "No realizado"],
-    rotPositions().map(([sym, p]) => {
+    rotPositions([r]).map(([sym, p]) => {
       const v = p.qty * rotPrice(p), u = p.qty * (rotPrice(p) - p.entry_price);
       return [sym, p.qty.toFixed(4), priceFmt(p.entry_price), priceFmt(rotPrice(p)), usd(v), value ? `${((v / value) * 100).toFixed(0)}%` : "—",
         { text: `${signedUsd(u)} (${pct((rotPrice(p) / p.entry_price - 1) * 100)})`, cls: signCls(u) }];
@@ -2040,8 +2051,8 @@ function feedItems() {
         what: h.rejected ? `${MODE_LABEL[h.mode] || h.mode} propuso ${text}` : `${MODE_LABEL[h.mode] || h.mode}: ${text} (${versions})`,
         why: (h.rationale || "") + evalNote(h), h });
   }
-  for (const t of state.rotation ? state.rotation.trades : []) {
-    items.push({ ts: t.closed_at, cat: "trade", cls: t.pnl >= 0 ? "good" : "bad", asset: `${t.symbol} (rotación)`,
+  for (const r of state.rotations || []) for (const t of r.trades) {
+    items.push({ ts: t.closed_at, cat: "trade", cls: t.pnl >= 0 ? "good" : "bad", asset: `${t.symbol} (rotación ${r.label})`,
       what: `Vende a ${priceFmt(t.exit_price)} · ${signedUsd(t.pnl)} (${pct((t.exit_price / t.entry_price - 1) * 100)})`, why: t.exit_reason === "rotation_exit" ? "salió del top" : reasonEs(t.exit_reason) });
   }
   for (const e of state.events || []) {

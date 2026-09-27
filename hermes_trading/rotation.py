@@ -1,4 +1,5 @@
-"""Monthly momentum rotation across large US stocks (goal.yaml `rotation:`), next to the per-asset books.
+"""Monthly momentum rotations across large stocks (goal.yaml `rotation:` and `rotations:`), next to the
+per-asset books.
 
 On the first trading day of each month (`after_open_min` minutes after the open) the `universe` is
 ranked by its 12-1 month return: the close `skip_days` trading days ago over the close
@@ -12,10 +13,18 @@ return, and a stock's fit in one half of the history didn't predict the other ha
 stocks against each other did: 20.7%/yr over five years (top 25 US stocks of 2021) and 19.6%/yr
 over eight (top 25 of 2016), against 12.5% and 16.6% for holding them all, drawdowns ~35%.
 
-One virtual account in state/rotation/: paper_account.json (cash, equity = start + closed P&L,
-positions, picks, last_rebalance, pending buys), trades.jsonl (each closed position) and
-rankings.jsonl (every ranking and its picks). Orders are real Alpaca paper orders; buys are capped
-by Alpaca's cash (never margin), which the ETF accounts share, and wait in `pending` until there is cash.
+Several rotations can run side by side, each over its own universe: `rotation:` (US stocks) and each
+entry of `rotations:` (e.g. `europe:`, European NYSE/NASDAQ ADRs). Why a separate European rotation
+and not a wider universe: scripts/research_global.py. Ranking US, European and Chinese stocks together
+let the most volatile names crowd the top 5 (5 years: 4.9%/yr against 22.6% for the US alone), while a
+European rotation next to the US one, a third of the capital, kept most of the return with a smaller
+drawdown over 5 and 10 years. Universes can't overlap: each Alpaca position has one owner.
+
+Each rotation has one virtual account, in state/rotation/ (`rotation:`) or state/rotation-<key>/
+(`rotations: {<key>: ...}`): paper_account.json (cash, equity = start + closed P&L, positions, picks,
+last_rebalance, pending buys), trades.jsonl (each closed position) and rankings.jsonl (every ranking
+and its picks). Orders are real Alpaca paper orders; buys are capped by Alpaca's cash (never margin),
+which the ETF accounts and the other rotations share, and wait in `pending` until there is cash.
 """
 from __future__ import annotations
 
@@ -53,6 +62,26 @@ def settings(goal: dict) -> dict | None:
     return s
 
 
+def all_settings(goal: dict) -> dict[str, dict]:
+    """Every enabled rotation by name: `rotation:` is "rotation", each `rotations: {key: ...}` entry
+    "rotation-<key>" (also its state dir). Each spec gets a `label` for logs and the dashboard."""
+    out = {}
+    first = settings(goal)
+    if first:
+        out["rotation"] = {**first, "label": str(first.get("label") or "EE. UU.")}
+    for key, spec in (goal.get("rotations") or {}).items():
+        s = settings({"rotation": spec or {}})
+        if s:
+            out[f"rotation-{key}"] = {**s, "label": str(s.get("label") or key)}
+    owner: dict[str, str] = {}
+    for name, s in out.items():
+        for sym in s["universe"]:
+            if sym in owner:
+                raise ValueError(f"{sym} is in two rotations ({owner[sym]}, {name}): each Alpaca position has one owner")
+            owner[sym] = name
+    return out
+
+
 def momentum(closes: list[float], lookback: int, skip: int) -> float | None:
     """12-1 month return from daily closes (oldest first): close `skip` days ago over `lookback` ago."""
     if len(closes) < lookback + 1 or closes[-1 - lookback] <= 0:
@@ -69,11 +98,11 @@ def _utcnow() -> str:
 
 
 class RotationBook:
-    asset = "rotation"
-
-    def __init__(self, spec: dict, root: Path | None = None) -> None:
+    def __init__(self, spec: dict, root: Path | None = None, name: str = "rotation") -> None:
         self.spec = spec
-        self.root = root or config.ROTATION_DIR
+        self.asset = name  # trades are logged as "<SYM>@<name>"
+        self.label = f"rotación {spec.get('label') or name}"
+        self.root = root or config.STATE / name
         self.root.mkdir(parents=True, exist_ok=True)
         self.paper_path = self.root / "paper_account.json"
         self.trades_path = self.root / "trades.jsonl"
@@ -262,7 +291,7 @@ class RotationBook:
         before = float(self.paper["equity"])
         self.paper["equity"] = before + gross
         self.paper["cash"] = float(self.paper["cash"]) + pos["qty"] * exit_price
-        trade = {**{k: v for k, v in pos.items() if k != "last_price"}, "asset": f"{sym}{config.SLEEVE_SEP}rotation", "symbol": sym,
+        trade = {**{k: v for k, v in pos.items() if k != "last_price"}, "asset": f"{sym}{config.SLEEVE_SEP}{self.asset}", "symbol": sym,
                  "direction": "long", "mode": "paper", "closed_at": _utcnow(), "exit_price": exit_price, "exit_reason": reason,
                  "gross_pnl": round(gross, 4), "fees": 0.0, "pnl": round(gross, 4), "pnl_pct": gross / before if before else 0.0,
                  "equity_after": round(self.paper["equity"], 4), **extra}

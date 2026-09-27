@@ -8,7 +8,8 @@ State layout (the Railway volume mirrors this):
   state/events.jsonl                 worker issues, recoveries, reflection failures, added assets
   state/assets/<BASE-QUOTE>/         per-asset: strategy.yaml, trades.jsonl, hypotheses.jsonl,
                                      paper_account.json, history/
-  state/rotation/                    the stock rotation: paper_account.json, trades.jsonl, rankings.jsonl
+  state/rotation/                    the US stock rotation: paper_account.json, trades.jsonl, rankings.jsonl
+  state/rotation-<key>/              each goal.yaml `rotations:` entry (e.g. rotation-europe/), same files
 """
 from __future__ import annotations
 
@@ -30,7 +31,6 @@ HEARTBEAT_FILE = STATE / "heartbeat.json"
 EQUITY_FILE = STATE / "equity.jsonl"  # capital snapshots for the dashboard's equity curve
 EVENTS_FILE = STATE / "events.jsonl"  # worker issues and actions for the dashboard's activity feed
 ASSETS_DIR = STATE / "assets"
-ROTATION_DIR = STATE / "rotation"  # the monthly momentum rotation's account (rotation.py)
 
 # Files the single-asset version kept at the state root; run.py migrates them on boot.
 LEGACY_FILES = ("strategy.yaml", "trades.jsonl", "hypotheses.jsonl", "paper_account.json")

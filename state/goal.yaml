@@ -144,6 +144,7 @@ sleeves:                     # extra strategies per pair, each with its own simu
       tendencia sola.
 rotation:                    # monthly momentum rotation across large US stocks (rotation.py), its own account
   enabled: true
+  label: "EE. UU."
   capital: 5000              # virtual account; orders share the Alpaca paper balance with the ETFs
   top: 5                     # stocks held, equal weight
   lookback_days: 252         # 12-1 month momentum: close 21 trading days ago over 252 days ago
@@ -157,3 +158,24 @@ rotation:                    # monthly momentum rotation across large US stocks 
     en 5 años (las 25 más grandes de 2021 + AMD) y 19,6%/año en 8 años (las 25 más grandes de 2016),
     frente a 12,5% y 16,6% manteniéndolas todas y 13,2% y 14,7% de SPY; caída máxima ~35%, similar a
     mantener. Operar cada acción con las señales del bot rendía la mitad (7-9%/año).
+rotations:                   # more rotations next to `rotation:`, each its own account in state/rotation-<key>/
+  europe:
+    enabled: true
+    label: "Europa"
+    capital: 2500            # a third of the stock rotations (US 5000); with the ETFs, within Alpaca's $10,000 cash
+    top: 10                  # stocks held, equal weight
+    lookback_days: 252
+    skip_days: 21
+    after_open_min: 30
+    universe: [ASML, HSBC, NVS, SHEL, AZN, SAP, SAN, TTE, NVO, BBVA, RIO, BUD, UBS, UL, BTI, BP, ING, EQNR,
+               SNY, GSK]     # 20 largest European companies with a NYSE/NASDAQ ADR (Sep 2026); ABB is OTC-only
+    note: >-
+      Rotación europea: la misma regla que la de EE. UU. sobre ADRs europeos de NYSE/NASDAQ (Alpaca las
+      opera con fracciones y sirve sus velas en el plan gratuito; las ADR OTC como Nestlé o LVMH no tienen
+      velas en ese plan y no mejoraban el resultado). Top 10 de 20. Backtest (scripts/research_global.py,
+      las 20 más grandes al inicio de cada prueba): 5 años 17,0%/año (mediana de 10 días de rebalanceo;
+      VGK 9,0%), 10 años 13,1% (VGK 9,7%). Junto a la rotación de EE. UU. con un tercio del capital:
+      5 años 23,0%/año, caída máxima 22% y Sharpe 1,1 frente a 25,4%, 29% y 1,0 de EE. UU. sola; 10 años
+      17,9%, 32% y 1,0 frente a 19,9%, 33% y 0,9. Aporta diversificación (correlación semanal 0,5-0,6),
+      no más rentabilidad. China se descartó: la rotación perdió en 5 años (-11%/año, caída ~53%) y
+      mezclarla en un solo ranking con EE. UU. empeoraba ambos.

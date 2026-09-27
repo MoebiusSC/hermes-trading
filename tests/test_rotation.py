@@ -135,6 +135,41 @@ class RotationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rotation.settings({"rotation": {"universe": ["A"], "top": 5}})
 
+    def test_several_rotations_have_their_own_names_and_universes(self):
+        goal = {"rotation": {"universe": ["AAA", "BBB"], "top": 1},
+                "rotations": {"europe": {"label": "Europa", "universe": ["CCC", "DDD"], "top": 1},
+                              "asia": {"enabled": False, "universe": ["EEE"], "top": 1}}}
+        specs = rotation.all_settings(goal)
+        self.assertEqual({n: s["label"] for n, s in specs.items()}, {"rotation": "EE. UU.", "rotation-europe": "Europa"})
+        self.assertEqual(list(rotation.all_settings({"rotations": {"europe": goal["rotations"]["europe"]}})), ["rotation-europe"])
+        with self.assertRaises(ValueError):  # one owner per Alpaca position
+            rotation.all_settings({**goal, "rotations": {"europe": {"universe": ["BBB", "CCC"], "top": 1}}})
+
+    def test_a_named_rotation_logs_its_trades_under_its_name(self):
+        spec = rotation.all_settings({"rotations": {"europe": {"universe": list(GROWTH), "top": 2, "capital": 1000}}})["rotation-europe"]
+        book, broker = rotation.RotationBook(spec, self.root, "rotation-europe"), FakeAlpaca(GROWTH)
+        self.assertEqual(book.label, "rotación europe")
+        self.run_tick(book, broker)
+        broker.date = "2026-11-02"
+        broker.growth = {**GROWTH, "CCC": 2.0, "BBB": -0.5}
+        self.run_tick(book, broker)
+        self.assertEqual(read_jsonl(self.root / "trades.jsonl")[-1]["asset"], "BBB@rotation-europe")
+
+    def test_rotations_share_alpaca_cash_without_margin(self):
+        from hermes_trading import loop
+        us = rotation.RotationBook(self.spec, self.root / "us", "rotation")
+        eu_spec = rotation.settings({"rotation": {"universe": ["X1", "X2"], "top": 2, "capital": 1000}})
+        eu = rotation.RotationBook(eu_spec, self.root / "eu", "rotation-europe")
+        broker = FakeAlpaca({**GROWTH, "X1": 0.4, "X2": 0.2}, buying_power=1500)
+        broker.margin = 4
+        worker = loop.Worker.__new__(loop.Worker)
+        worker.rotations = [us, eu]
+        with mock.patch.object(rotation.alpaca, "client", return_value=broker):
+            first, second = asyncio.run(worker._tick_rotations())
+        self.assertIn("bought AAA", first["decision"])
+        self.assertIn("waiting for cash to buy X2", second["decision"])
+        self.assertLessEqual(sum(q * broker.price[s] for s, q in broker.held.items()), 1500)
+
 
 HOLD = {"version": "01", "entry": {"indicator": "hold", "direction": "long", "timeframe": "1d"}, "stop_loss_pct": 2.0,
         "stop_atr_mult": 3.0, "take_profit_r": 0, "position_size_r": 0.5, "position_pct": 100, "max_hold_min": 0}
