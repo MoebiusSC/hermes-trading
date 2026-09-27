@@ -637,8 +637,12 @@ const isStock = (asset) => !asset.includes("/");
 // "BTC/USDT@momentum" is a second strategy on BTC/USDT with its own account: "BTC·momentum"
 const short = (asset) => { const [sym, sleeve] = asset.split("@"); const base = sym.split("/")[0]; return sleeve ? `${base}·${sleeve}` : base; };
 // Hues are assigned in goal order within each category; past the sixth asset lines fall back to muted ink.
+const symbolOf = (asset) => asset.split("@")[0];
+const sleeveOf = (asset) => asset.split("@")[1] || null;
+const assetLabel = (asset) => (sleeveOf(asset) ? `${symbolOf(asset)} · ${sleeveOf(asset)}` : asset);
 const colorFor = (asset) => {
-  const i = state.goal.assets.filter((a) => isStock(a) === isStock(asset)).indexOf(asset);
+  const pairs = state.goal.assets.filter((a) => !sleeveOf(a) && isStock(a) === isStock(asset));
+  const i = pairs.indexOf(symbolOf(asset));
   return css(SERIES_VARS[i] || "--text-muted");
 };
 
@@ -1431,7 +1435,7 @@ function renderPositions() {
     const btn = el("button", { type: "button", class: "danger" }, "Vender");
     if (closed) { btn.disabled = true; btn.title = "Mercado cerrado: los ETFs se venden en horario de mercado"; }
     btn.addEventListener("click", () => sell(a.asset, btn));
-    return [`${a.asset}${pos.manual ? " · manual" : ""} · ${pos.direction}`, priceFmt(pos.entry_price), last != null ? priceFmt(last) : "—",
+    return [{ text: `${assetLabel(a.asset)}${pos.manual ? " · manual" : ""} · ${pos.direction}`, cls: "wrap" }, priceFmt(pos.entry_price), last != null ? priceFmt(last) : "—",
       priceFmt(pos.stop), priceFmt(pos.target), last != null ? usd(pos.qty * last) : "—",
       `${((pos.qty * pos.entry_price) / a.paper.equity * 100).toFixed(0)}%`,
       { text: signedUsd(u), cls: signCls(u) }, { node: btn, cls: "act" }];
@@ -1440,7 +1444,8 @@ function renderPositions() {
 
 // ================= Activos =================
 const COLUMNS = [
-  { key: "asset", label: "Activo", get: (a) => a.asset, fmt: (v) => v },
+  { key: "asset", label: "Activo", get: (a) => a.asset, fmt: (v) => assetLabel(v) },
+  { key: "strategy", label: "Estrategia", get: (a) => (a.strategy ? `${signalText(stratView(a.strategy))} · ${TF_LABEL[stratView(a.strategy).timeframe]}` : "—"), fmt: (v) => v },
   { key: "ver", label: "Ver.", opt: true, get: (a) => Number(a.strategy ? a.strategy.version : 0), fmt: (v) => "v" + String(v).padStart(2, "0") },
   { key: "total", label: "Rentab. total", num: true, get: (a) => assetTotalRet(a), fmt: (v) => ({ text: pct(v), cls: signCls(v) }) },
   { key: "bh", label: "Mantener", num: true, get: (a) => { const b = buyHold(a); return b ? b.ret : null; }, fmt: (v) => (v == null ? "—" : { text: pct(v), cls: signCls(v) }) },
@@ -1546,7 +1551,7 @@ function renderDetail() {
   segSync("tf-seg", "tf", ui.tf);
   const c = ui.tf === "1m" ? c1 : tfCandles[`${a.asset}|${ui.tf}`];
   const TF_TEXT = { "1m": "velas de 1 minuto (3 h)", "5m": "velas de 5 minutos (24 h)", "1h": "velas de 1 hora (7 días)", "1d": "velas diarias (6 meses)" };
-  document.getElementById("price-title").textContent = `Precio de ${a.asset}`;
+  document.getElementById("price-title").textContent = `Precio de ${symbolOf(a.asset)}`;
   document.getElementById("price-sub").textContent = c ? `${TF_TEXT[ui.tf]} · ${a.kind === "stock" ? "solo horario regular · " : ""}en vivo desde ${c.source}` : "Cargando velas…";
   const refs = [], marks = [];
   const pos = a.paper.position;
@@ -1626,7 +1631,7 @@ function renderDetail() {
       priceFmt(t.entry_price), priceFmt(t.exit_price), reasonEs(t.exit_reason), t.fees != null ? usd(t.fees) : "sin simular",
       { text: `${signedUsd(t.pnl)} (${pct(t.pnl_pct * 100, 3)})`, cls: signCls(t.pnl) }]), { empty: "Aún sin operaciones cerradas." });
 
-  document.getElementById("strategy-title").textContent = strat ? `Estrategia v${strat.version} · ${a.asset}` : "Estrategia";
+  document.getElementById("strategy-title").textContent = strat ? `Estrategia v${strat.version} · ${assetLabel(a.asset)}` : "Estrategia";
   document.getElementById("strategy-sub").textContent = `Puntuación ${a.score.toFixed(3)} en una escala de −1 a +1`;
   const params = document.getElementById("params");
   params.replaceChildren();
@@ -1667,7 +1672,7 @@ function renderDetail() {
     const left = Math.max(0, state.goal.reflection_every - a.trades.length);
     hist.append(el("li", {}, left ? `Aún sin cambios: primera reflexión tras ${left} operaci${left > 1 ? "ones cerradas" : "ón cerrada"} más.` : "Aún sin cambios: toca en la próxima reflexión."));
   }
-  for (const g of changeGroups(a.hypotheses).reverse()) {
+  for (const g of changeGroups(a.hypotheses, a.asset).reverse()) {
     const h = g.h, li = el("li");
     const head = el("div", { class: "what" }, `${h.rejected ? "Propuesta" : g.versions} · ${g.text}${h.clamped ? ` (pedido ${h.requested_value}, limitado)` : ""} `);
     head.append(evalChip(h));
@@ -1680,16 +1685,16 @@ function renderDetail() {
 // ---------- strategy editor (one asset) ----------
 // Mirrors reflect.py TUNABLE bounds; the worker validates again.
 const SETTINGS = [
-  { key: "entry.threshold", label: "RSI de entrada", min: 5, max: 95, step: 1, hint: "long: compra por debajo · short: vende por encima" },
-  { key: "exit_rsi", label: "RSI de salida", min: 55, max: 90, step: 1, fallback: 70, hint: "long sale al subir a este nivel; short, al bajar a 100 menos este valor" },
+  { key: "entry.threshold", only: ["rsi"], label: "RSI de entrada", min: 5, max: 95, step: 1, hint: "long: compra por debajo · short: vende por encima" },
+  { key: "exit_rsi", only: ["rsi"], label: "RSI de salida", min: 55, max: 90, step: 1, fallback: 70, hint: "long sale al subir a este nivel; short, al bajar a 100 menos este valor" },
   { key: "stop_atr_mult", label: "Stop (× ATR)", min: 0, max: 6, step: 0.25, fallback: 0, hint: "0 = usar el stop loss %; si no, la distancia del stop se adapta a la volatilidad" },
   { key: "stop_loss_pct", label: "Stop loss %", min: 0.2, max: 10, step: 0.1, hint: "solo se usa con Stop (× ATR) en 0" },
   { key: "take_profit_r", label: "Objetivo (× stop)", min: 0, max: 10, step: 0.1, fallback: 2.0, hint: "0 = sin objetivo (la tendencia sale por el cruce o el stop)" },
-  { key: "entry.fast", label: "EMA rápida", min: 2, max: 200, step: 1, fallback: 50, hint: "solo cruce de EMA" },
-  { key: "entry.slow", label: "EMA lenta", min: 5, max: 400, step: 1, fallback: 200, hint: "solo cruce de EMA; mayor que la rápida" },
-  { key: "entry.lookback", label: "Momentum: velas atrás", min: 5, max: 365, step: 5, fallback: 60, hint: "solo momentum" },
-  { key: "entry.ma", label: "Media móvil (velas)", min: 10, max: 400, step: 10, fallback: 100, hint: "solo media móvil" },
-  { key: "entry.target_vol", label: "Volatilidad objetivo", min: 0, max: 3, step: 0.1, fallback: 0, hint: "anual, p. ej. 0.5 = 50%; reduce el tamaño si la volatilidad es mayor; 0 = no" },
+  { key: "entry.fast", only: ["ema_cross"], label: "EMA rápida", min: 2, max: 200, step: 1, fallback: 50, hint: "solo cruce de EMA" },
+  { key: "entry.slow", only: ["ema_cross"], label: "EMA lenta", min: 5, max: 400, step: 1, fallback: 200, hint: "solo cruce de EMA; mayor que la rápida" },
+  { key: "entry.lookback", only: ["tsmom"], label: "Momentum: velas atrás", min: 5, max: 365, step: 5, fallback: 60, hint: "solo momentum" },
+  { key: "entry.ma", only: ["ma_regime"], label: "Media móvil (velas)", min: 10, max: 400, step: 10, fallback: 100, hint: "solo media móvil" },
+  { key: "entry.target_vol", only: ["ema_cross", "tsmom", "ma_regime"], label: "Volatilidad objetivo", min: 0, max: 3, step: 0.1, fallback: 0, hint: "anual, p. ej. 0.5 = 50%; reduce el tamaño si la volatilidad es mayor; 0 = no" },
   { key: "max_hold_min", label: "Tiempo máximo (min)", min: 0, max: 2880, step: 30, fallback: 0, hint: "0 = sin límite" },
   { key: "position_size_r", label: "Riesgo / operación %", min: 0.1, max: 2, step: 0.05, hint: "sin efecto si la exposición por posición es mayor que 0" },
   { key: "position_pct", label: "Exposición por posición %", min: 0, max: 100, step: 5, fallback: 0, hint: "% de la cuenta que usa cada posición; 0 = según el riesgo por operación y el stop" },
@@ -1698,7 +1703,7 @@ const SELECTS = [
   { key: "entry.indicator", label: "Tipo de señal", options: ["rsi", "ema_cross", "tsmom", "ma_regime"],
     labels: { rsi: "RSI (reversión)", ema_cross: "Cruce de EMA (tendencia)", tsmom: "Momentum (serie temporal)", ma_regime: "Precio vs media móvil" }, fallback: "rsi" },
   { key: "entry.timeframe", label: "Velas de la señal", options: ["1m", "5m", "15m", "1h", "4h", "1d"], fallback: "1m" },
-  { key: "trend_filter", label: "Filtro de tendencia", options: ["off", "1h", "4h"], fallback: "off" },
+  { key: "trend_filter", only: ["rsi"], label: "Filtro de tendencia", options: ["off", "1h", "4h"], fallback: "off" },
 ];
 const drafts = {};  // asset -> {key: value} not saved yet; survives the periodic re-render
 const getPath = (o, k) => k.split(".").reduce((x, p) => (x == null ? x : x[p]), o);
@@ -1736,13 +1741,18 @@ function renderEditor(a) {
   if (a.kind === "stock") { dir.disabled = true; dir.title = "Las acciones y los ETFs solo operan en long"; }
   bind(dir, "entry.direction");
   form.append(el("label", { for: "ed-dir" }, "Dirección"), dir);
+  const shown = (f) => !f.only || f.only.includes(value("entry.indicator"));
   for (const f of SELECTS) {
+    if (!shown(f)) continue;
     const id = "ed-" + f.key.replace(".", "-"), sel = el("select", { id });
     for (const o of f.options) { const opt = el("option", { value: o }, (f.labels || TF_LABEL)[o]); if (value(f.key) === o) opt.selected = true; sel.append(opt); }
     bind(sel, f.key);
+    // another signal type has other settings: redraw with the draft kept
+    if (f.key === "entry.indicator") sel.addEventListener("change", () => { host.dataset.asset = ""; renderEditor(a); });
     form.append(el("label", { for: id }, f.label), sel);
   }
   for (const f of SETTINGS) {
+    if (!shown(f)) continue;
     const id = "ed-" + f.key.replace(".", "-");
     const input = el("input", { id, type: "number", min: f.min, max: f.max, step: f.step, value: value(f.key) });
     input.title = `${f.min} – ${f.max}${f.hint ? " · " + f.hint : ""}`;
@@ -1809,7 +1819,7 @@ function evalNote(h) {
 }
 // Changes saved together (a manual edit or a migration touching several variables) share a
 // timestamp; show them as one entry.
-function changeGroups(hypotheses) {
+function changeGroups(hypotheses, asset) {
   const out = [];
   for (const h of hypotheses) {
     const last = out[out.length - 1];
@@ -1817,13 +1827,16 @@ function changeGroups(hypotheses) {
     else out.push({ h, items: [h] });
   }
   for (const g of out) {
-    g.text = g.items.map((x) => `${varLabel(x.variable)} ${x.old_value} → ${x.new_value}`).join(" · ");
+    const created = asset && sleeveOf(asset) && g.h.mode === "migration" && g.items.some((x) => x.variable === "entry.indicator");
+    g.text = created
+      ? "Sub-cuenta creada · " + g.items.map((x) => `${varLabel(x.variable)} ${x.new_value}`).join(" · ")
+      : g.items.map((x) => `${varLabel(x.variable)} ${x.old_value} → ${x.new_value}`).join(" · ");
     g.versions = `v${g.h.from_version} → v${g.items[g.items.length - 1].to_version}`;
   }
   return out;
 }
 function allChanges() {
-  return state.assets.flatMap((a) => changeGroups(a.hypotheses).map((g) => ({ a, h: g.h, g })))
+  return state.assets.flatMap((a) => changeGroups(a.hypotheses, a.asset).map((g) => ({ a, h: g.h, g })))
     .sort((x, y) => Date.parse(y.h.ts) - Date.parse(x.h.ts));
 }
 function evalSummary() {
@@ -1855,10 +1868,10 @@ function renderEstrategia() {
       kpi("Cambios en el último ciclo", String(changed)), kpi("Rechazados", String(rejectedNow)), kpi("Errores", String(failed + (r.error ? 1 : 0)), failed || r.error ? "down" : ""));
     if (r.error) { const box = el("div", { class: "warnbox" }); box.textContent = "El ciclo falló: " + r.error; err.append(box); }
     table(document.getElementById("reflect-table"), ["Activo", "Resultado del último ciclo"], reports.map(([asset, text]) =>
-      [asset, { text: reportEs(text), cls: "wrap" + (text.startsWith("FAILED") ? " down" : /^v\d+/.test(text) ? " up" : "") }]));
+      [assetLabel(asset), { text: reportEs(text), cls: "wrap" + (text.startsWith("FAILED") ? " down" : /^v\d+/.test(text) ? " up" : "") }]));
   }
   const ev = evalSummary();
-  document.getElementById("eval-sub").textContent = `Antes de aplicarse, cada propuesta de la IA se prueba con un backtest de 30 días: solo se aplica si no empeora fuera de muestra. Después se mide en vivo comparando la puntuación de las ${state.goal.reflection_every} operaciones anteriores con las ${state.goal.reflection_every} siguientes; si empeora claramente, se revierte sola.`;
+  document.getElementById("eval-sub").textContent = `Antes de aplicarse, cada propuesta de la IA se prueba con un backtest (de 3 meses a 3 años de historia según el tamaño de vela de la estrategia): solo se aplica si no empeora fuera de muestra. Después se mide en vivo comparando la puntuación de las ${state.goal.reflection_every} operaciones anteriores con las ${state.goal.reflection_every} siguientes; si empeora claramente, se revierte sola.`;
   document.getElementById("eval-kpis").replaceChildren(
     kpi("Mejoraron", `${ev.improved} de ${ev.done}`, ev.done ? (ev.improved * 2 >= ev.done ? "up" : "down") : "", "cambios automáticos ya medidos"),
     kpi("Predicción acertada", ev.predicted ? `${ev.matched} de ${ev.predicted}` : "—", "", "la IA dijo si la puntuación subiría o bajaría"),
@@ -1868,7 +1881,7 @@ function renderEstrategia() {
   table(document.getElementById("eval-table"), ["Fecha", "Activo", "Origen", "Cambio", "Resultado", "Puntuación", "Media por operación"],
     allChanges().map(({ a, h, g }) => {
       const e = h.evaluation || {};
-      return { cells: [dateTimeFmt(Date.parse(h.ts)), a.asset, MODE_LABEL[h.mode] || h.mode, { text: g.text, cls: "wrap" },
+      return { cells: [dateTimeFmt(Date.parse(h.ts)), assetLabel(a.asset), MODE_LABEL[h.mode] || h.mode, { text: g.text, cls: "wrap" },
         { node: evalChip(h) },
         e.status === "done" ? `${e.score_before.toFixed(2)} → ${e.score_after.toFixed(2)}` : "—",
         e.status === "done" ? `${pct(e.avg_before * 100, 3)} → ${pct(e.avg_after * 100, 3)}` : "—"],
@@ -1881,7 +1894,7 @@ function renderEstrategia() {
       const pending = lastH ? a.trades.filter((t) => t.closed_at > lastH.ts).length : a.trades.length;
       const b = el("button", { type: "button", class: "small" }, "Editar");
       b.addEventListener("click", () => { selected = a.asset; setTab("activos"); setTimeout(() => document.getElementById("editor").scrollIntoView({ behavior: "smooth", block: "center" }), 50); });
-      return [a.asset, "v" + a.strategy.version, signalText(v), DIR_LABEL[v.direction], TF_LABEL[v.timeframe], TF_LABEL[v.trend],
+      return [assetLabel(a.asset), "v" + a.strategy.version, signalText(v), DIR_LABEL[v.direction], TF_LABEL[v.timeframe], TF_LABEL[v.trend],
         stopText(v), v.tp > 0 ? String(v.tp) : "sin objetivo", v.maxHold > 0 ? durationFmt(v.maxHold * 60000) : "—", v.posPct > 0 ? `${v.posPct}% fijo` : `riesgo ${v.risk}%`,
         `${Math.min(pending, state.goal.reflection_every)}/${state.goal.reflection_every}`, { node: b, cls: "act" }];
     }));
@@ -1898,7 +1911,7 @@ function feedItems() {
     }
     const p = a.paper.position;
     if (p) items.push({ ts: p.opened_at, cat: "trade", cls: "", asset: a.asset, what: `Abre ${p.direction} a ${priceFmt(p.entry_price)}${p.manual ? " (manual)" : ""}`, why: "posición abierta ahora" });
-    for (const { h, text, versions } of changeGroups(a.hypotheses))
+    for (const { h, text, versions } of changeGroups(a.hypotheses, a.asset))
       items.push({ ts: h.ts, cat: "strategy", cls: h.rejected ? "" : "strategy", asset: a.asset,
         what: h.rejected ? `${MODE_LABEL[h.mode] || h.mode} propuso ${text}` : `${MODE_LABEL[h.mode] || h.mode}: ${text} (${versions})`,
         why: (h.rationale || "") + evalNote(h), h });
@@ -1920,7 +1933,7 @@ function renderFeed(host, items, withDays) {
     const ms = Date.parse(it.ts);
     if (withDays && new Date(ms).toDateString() !== day) { day = new Date(ms).toDateString(); host.append(el("li", { class: "day" }, dayFmt(ms))); }
     const li = el("li", { class: it.cls || "" });
-    const what = el("div", { class: "what" }, `${it.asset ? it.asset + " · " : ""}${it.what} `);
+    const what = el("div", { class: "what" }, `${it.asset ? assetLabel(it.asset) + " · " : ""}${it.what} `);
     if (it.h) what.append(evalChip(it.h));
     li.append(what, el("div", { class: "muted" }, withDays ? timeFmt(ms) : dateTimeFmt(ms)));
     if (it.why) li.append(el("div", { class: "why" }, it.why));
