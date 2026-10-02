@@ -124,9 +124,16 @@ def set_path(d: dict, dotted: str, value) -> None:
 
 
 def new_trades_since_last_reflection(trades: list[dict], hypotheses: list[dict]) -> int:
-    if not hypotheses:
+    """Count evidence since the last *valid* reflection decision.
+
+    Technical/validation failures are logged with consumes_cadence=False, so they do not throw away
+    the accumulated closed trades. Older records have no flag and therefore keep the historical
+    behaviour (they consume the cadence).
+    """
+    cadence = [h for h in hypotheses if h.get("consumes_cadence", True)]
+    if not cadence:
         return len(trades)
-    last = hypotheses[-1]["ts"]
+    last = cadence[-1]["ts"]
     return sum(1 for t in trades if t["closed_at"] > last)
 
 
@@ -331,6 +338,7 @@ def apply(
         "predicted_direction": hyp.get("predicted_direction"),
         "metrics_before": m,
         "score_before": s,
+        "consumes_cadence": True,
     }
     if backtest:
         record["backtest"] = backtest
@@ -392,6 +400,7 @@ def apply_manual(paths: config.AssetPaths, changes: dict, stock: bool, mode: str
             "variable": variable, "old_value": old, "new_value": new,
             "requested_value": new, "clamped": False,
             "rationale": rationale, "predicted_direction": None,
+            "consumes_cadence": True,
         }
         append_jsonl(paths.hypotheses, record)
         records.append(record)
@@ -402,9 +411,12 @@ def evaluate_changes(trades: list[dict], hypotheses: list[dict], goal: dict) -> 
     """Did each strategy change help? Compares the score of the `reflection_every` trades closed
     before it with the ones opened under it (until the next change). Small samples: a hint only."""
     n = int(goal["reflection_every"])
-    applied = [h for h in hypotheses if not h.get("rejected")]
+    applied = [h for h in hypotheses if not h.get("rejected") and not h.get("no_change")]
     out = []
     for h in hypotheses:
+        if h.get("no_change"):
+            out.append({**h, "evaluation": {"status": "observed"}})
+            continue
         if h.get("rejected"):
             out.append({**h, "evaluation": {"status": "rejected"}})
             continue
@@ -431,9 +443,10 @@ class Proposal(NamedTuple):
     hyp: dict
     m: dict
     s: float
-    mode: str = ""           # overrides the cycle's mode (e.g. "revert")
+    mode: str = ""           # overrides the cycle's mode (e.g. "revert" / "observe")
     backtest: dict | None = None
     rejected: bool = False
+    consumes_cadence: bool = True
 
 
 def _bt_brief(r: dict) -> dict:
@@ -456,7 +469,8 @@ def _recent_duplicate(hypotheses: list[dict], variable: str, value: float) -> bo
 
 def _revert_candidate(trades: list[dict], hypotheses: list[dict], goal: dict) -> dict | None:
     """The last applied automatic change, if it has been measured and made things clearly worse."""
-    applied = [h for h in evaluate_changes(trades, hypotheses, goal) if not h.get("rejected")]
+    applied = [h for h in evaluate_changes(trades, hypotheses, goal)
+               if not h.get("rejected") and not h.get("no_change")]
     if not applied:
         return None
     last = applied[-1]
@@ -512,35 +526,45 @@ def propose(asset: str, goal: dict, mode: str, force: bool, validate: bool = Tru
     else:
         hyp = fallback_hypothesis(strategy, goal, m)
     if hyp is None:
-        return f"targets met (score {s}) — no change this cycle."
+        return Proposal(
+            paths, strategy, {"rationale": f"targets met (score {s}) — no change needed."}, m, s,
+            mode="observe",
+        )
     if hyp["variable"] == "entry.indicator" and hyp["new_value"] not in rules.AUTO_INDICATORS:
-        return Proposal(paths, strategy, hyp, m, s, rejected=True,
+        return Proposal(paths, strategy, hyp, m, s, rejected=True, consumes_cadence=False,
                         backtest={"verdict": "rejected", "reason": "invalid", "error": f"{hyp['new_value']} is set by hand only"})
     if _recent_duplicate(hypotheses, hyp["variable"], _bounded(strategy, hyp)):
-        # logged as rejected so the cadence restarts instead of asking the same question every cycle
-        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "duplicate"}, rejected=True)
+        # A duplicate is a model-quality issue, not new evidence: log it without consuming the 10 trades.
+        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "duplicate"},
+                        rejected=True, consumes_cadence=False)
     if not validate:
         return Proposal(paths, strategy, hyp, m, s)
     if not bt_ok:
-        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": (baseline or {}).get("error")})
+        # Never apply an AI proposal without its backtest gate. Keep the accumulated live evidence.
+        return Proposal(paths, strategy, hyp, m, s,
+                        backtest={"verdict": "unavailable", "error": (baseline or {}).get("error")},
+                        rejected=True, consumes_cadence=False)
 
     candidate_strategy = copy.deepcopy(strategy)
     _set_path_creating(candidate_strategy, hyp["variable"], _bounded(strategy, hyp))
     try:
         rules.params(candidate_strategy)
     except ValueError as e:  # e.g. entry.fast above entry.slow: never apply it unvalidated
-        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "rejected", "reason": "invalid", "error": str(e)[:200]},
-                        rejected=True)
+        return Proposal(paths, strategy, hyp, m, s,
+                        backtest={"verdict": "rejected", "reason": "invalid", "error": str(e)[:200]},
+                        rejected=True, consumes_cadence=False)
     try:
         candidate = backtest.run(asset, candidate_strategy, goal, validation_days(strategy))
     except Exception as e:
-        return Proposal(paths, strategy, hyp, m, s, backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]})
+        return Proposal(paths, strategy, hyp, m, s,
+                        backtest={"verdict": "unavailable", "error": f"{type(e).__name__}: {e}"[:200]},
+                        rejected=True, consumes_cadence=False)
     b, c = _bt_brief(bt_ok), _bt_brief(candidate)
     if c["oos_n"] < MIN_OOS_TRADES:
         verdict = {"verdict": "rejected", "reason": "insufficient_oos_trades",
                    "minimum_oos_trades": MIN_OOS_TRADES, "baseline": b, "candidate": c,
                    "period": {"from": bt_ok["from"], "to": bt_ok["to"], "split": bt_ok["split"]}}
-        return Proposal(paths, strategy, hyp, m, s, backtest=verdict, rejected=True)
+        return Proposal(paths, strategy, hyp, m, s, backtest=verdict, rejected=True, consumes_cadence=False)
     better_all = (c["all_score"], c["all_return_pct"]) > (b["all_score"], b["all_return_pct"])
     accepted = c["oos_score"] >= b["oos_score"] and better_all
     verdict = {"verdict": "accepted" if accepted else "rejected", "baseline": b, "candidate": c,
@@ -563,10 +587,15 @@ def _bounded(strategy: dict, hyp: dict):
 
 
 def reject(p: Proposal, mode: str) -> dict:
-    """Log a hypothesis the backtest refused, without touching the strategy. It restarts the cadence."""
+    """Log a refused hypothesis without touching the strategy.
+
+    Only evidence-based rejections consume the 10-trade cadence. Technical failures, insufficient
+    OOS history, invalid proposals and duplicates remain visible in the log but keep the evidence.
+    """
     record = {
         "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "asset": p.paths.asset, "mode": mode, "rejected": True,
+        "consumes_cadence": p.consumes_cadence,
         "from_version": str(p.strategy["version"]), "to_version": str(p.strategy["version"]),
         "variable": p.hyp["variable"], "old_value": _current(p.strategy, p.hyp["variable"]),
         "new_value": _bounded(p.strategy, p.hyp), "requested_value": p.hyp["new_value"], "clamped": False,
@@ -584,8 +613,29 @@ def _current(strategy: dict, variable: str):
         return TUNABLE_DEFAULTS.get(variable)
 
 
+def observe(p: Proposal, mode: str) -> dict:
+    """Record a valid reflection that concluded no parameter change was needed."""
+    record = {
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "asset": p.paths.asset,
+        "mode": mode,
+        "no_change": True,
+        "consumes_cadence": True,
+        "from_version": str(p.strategy["version"]),
+        "to_version": str(p.strategy["version"]),
+        "rationale": p.hyp.get("rationale", "no change needed"),
+        "metrics_before": p.m,
+        "score_before": p.s,
+    }
+    append_jsonl(p.paths.hypotheses, record)
+    return record
+
+
 def apply_proposal(p: Proposal, mode: str) -> str:
     mode = p.mode or mode
+    if mode == "observe":
+        r = observe(p, mode)
+        return r["rationale"]
     if p.rejected:
         r = reject(p, mode)
         verdict = (p.backtest or {}).get("verdict")

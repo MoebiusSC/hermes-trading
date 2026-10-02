@@ -1,9 +1,9 @@
 """24/7 reliability loop: every minute, for each asset, pull data, evaluate that asset's
 strategy.yaml, paper trade, log. One heartbeat covers all assets.
 
-With HERMES_REFLECT=llm|hermes|fallback the worker also runs the reflection cycle itself every
-HERMES_REFLECT_EVERY_S seconds (default 1800), writing straight to its own state — the same job
-the local scheduled task did through remote.py, without the pull/push round trip.
+With HERMES_REFLECT=llm|hermes|fallback the worker reflects immediately when an asset accumulates
+reflection_every new closed trades. A HERMES_REFLECT_EVERY_S watchdog (default 1800) also checks all
+assets periodically, so a missed event cannot stall learning.
 
 Crypto pairs (BTC/USDT) are simulated fills at the last price. Stocks/ETFs (SPY) are real
 orders in the Alpaca *paper* account, traded only during market hours."""
@@ -25,7 +25,7 @@ from . import config, reflect, rotation
 from . import strategy as rules
 from .adapters import SchemaError, alpaca, check_schema, macro, news, onchain, price, stocks
 from .adapters.alpaca import AlpacaError
-from .storage import append_jsonl, load_yaml, write_json
+from .storage import append_jsonl, load_yaml, read_jsonl, write_json
 
 console = Console()
 
@@ -47,7 +47,13 @@ START_EQUITY = config.CRYPTO_START_EQUITY  # per crypto asset
 RSI_PERIOD = 14
 # Portfolio limits (goal.yaml `risk:` overrides): crypto pairs move together, so many open
 # positions are close to one big bet.
-DEFAULT_RISK = {"max_open_positions": 6, "max_open_crypto": 4, "max_exposure_pct": 60}
+DEFAULT_RISK = {
+    "max_open_positions": 6,
+    "max_open_crypto": 4,
+    "max_exposure_pct": 60,
+    "loss_streak_pause": 4,
+    "asset_pause_minutes": 60,
+}
 STOCK_WARMUP_MIN = 15  # no stock entries until RSI is built from today's bars
 MIN_ORDER_USD = 1.0  # Alpaca's fractional-order minimum
 
@@ -277,6 +283,8 @@ class AssetBook:
             await f.write(json.dumps(trade) + "\n")
         self.paper["position"] = None
         self._save_paper()
+        if self.worker:
+            self.worker.on_trade_closed(self)
 
     def _risk_block(self, notional: float) -> str | None:
         """A reason to skip this entry because of portfolio limits; reserves the slot otherwise."""
@@ -607,6 +615,9 @@ class Worker:
         self._reserved: set[str] = set()  # assets between a passed risk check and their position being recorded
         self.loop: asyncio.AbstractEventLoop | None = None  # set in run(); the state server posts actions to it
         self.reflection: dict = {}  # last reflection cycle, reported in the heartbeat
+        self.reflect_mode: str | None = None
+        self._reflection_inflight: set[str] = set()
+        self._reflection_tasks: set[asyncio.Task] = set()
         self.last_prices: dict[str, float] = {}  # stocks keep their last price while the market is closed
         self._issues: dict[str, str | None] = {}  # asset -> the issue last logged, so each is logged once
         self._last_snapshot = float("-inf")  # first snapshot on the first tick
@@ -672,10 +683,52 @@ class Worker:
         except OSError as e:
             console.log(f"[red]equity snapshot failed:[/] {e}")
 
+    def _asset_pause_reason(self, book: AssetBook, goal: dict) -> str | None:
+        """Temporary per-asset safety brake for an abnormal drawdown or losing streak.
+
+        It blocks *new* entries only; exits keep working. The pause expires after asset_pause_minutes,
+        so the safety brake cannot permanently deadlock an asset before it reaches its next reflection.
+        """
+        risk = {**DEFAULT_RISK, **(goal.get("risk") or {})}
+        trades = read_jsonl(book.paths.trades)
+        if not trades:
+            return None
+        try:
+            last_close = dt.datetime.fromisoformat(str(trades[-1]["closed_at"]).replace("Z", "+00:00"))
+            age_min = (dt.datetime.now(dt.timezone.utc) - last_close).total_seconds() / 60
+        except (KeyError, TypeError, ValueError):
+            return None
+        pause_min = max(0.0, float(risk.get("asset_pause_minutes", 60)))
+        if age_min >= pause_min:
+            return None
+
+        loss_n = max(0, int(risk.get("loss_streak_pause", 4)))
+        if loss_n and len(trades) >= loss_n and all(float(t.get("pnl", 0.0)) < 0 for t in trades[-loss_n:]):
+            return f"risk pause: {loss_n} consecutive losses; retry after {pause_min:g} min"
+
+        dd_limit = float(risk.get("asset_drawdown_pause", goal.get("max_drawdown", 0.0)) or 0.0)
+        if dd_limit > 1:
+            dd_limit /= 100.0
+        equities = [book.start_equity]
+        for t in trades:
+            try:
+                equities.append(float(t["equity_after"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        peak = max(equities) if equities else book.start_equity
+        current = float(book.paper.get("equity", book.start_equity))
+        drawdown = max(0.0, 1.0 - current / peak) if peak > 0 else 0.0
+        if dd_limit > 0 and drawdown >= dd_limit:
+            return f"risk pause: asset drawdown {drawdown:.1%} >= {dd_limit:.1%}; retry after {pause_min:g} min"
+        return None
+
     def risk_check(self, book: AssetBook, notional: float) -> str | None:
-        """Portfolio limits for a new entry (goal.yaml `risk:`). Returns why it's refused, or
-        None and reserves the slot until release()."""
-        risk = {**DEFAULT_RISK, **(load_yaml(config.GOAL_FILE).get("risk") or {})}
+        """Portfolio and temporary per-asset limits before every automatic entry."""
+        goal = load_yaml(config.GOAL_FILE)
+        risk = {**DEFAULT_RISK, **(goal.get("risk") or {})}
+        paused = self._asset_pause_reason(book, goal)
+        if paused:
+            return paused
         busy = [b for b in self.books if b is not book and (b.paper["position"] or b.asset in self._reserved)]
         if len(busy) >= int(risk["max_open_positions"]):
             return f"risk limit: {len(busy)} positions open (max {risk['max_open_positions']})"
@@ -772,12 +825,52 @@ class Worker:
                 return "strategy changed while reflecting — retrying next cycle."
             return reflect.apply_proposal(proposal, mode)
 
+    async def _reflect_book_guarded(self, book: AssetBook, goal: dict, mode: str) -> str:
+        """Serialize event-driven and watchdog reflections per asset."""
+        if book.asset in self._reflection_inflight:
+            return "reflection already in progress."
+        self._reflection_inflight.add(book.asset)
+        try:
+            return await self._reflect_book(book, goal, mode)
+        finally:
+            self._reflection_inflight.discard(book.asset)
+
+    def on_trade_closed(self, book: AssetBook) -> None:
+        """Trigger reflection as soon as the asset reaches its evidence threshold."""
+        if not self.reflect_mode or not self.loop:
+            return
+        goal = load_yaml(config.GOAL_FILE)
+        hypotheses = read_jsonl(book.paths.hypotheses)
+        pending = reflect.new_trades_since_last_reflection(read_jsonl(book.paths.trades), hypotheses)
+        if pending < int(goal["reflection_every"]):
+            return
+
+        async def run_due() -> None:
+            try:
+                report = await self._reflect_book_guarded(book, load_yaml(config.GOAL_FILE), self.reflect_mode or "fallback")
+                self.reflection = {
+                    "ts": utcnow(), "mode": self.reflect_mode, "trigger": "trade_close",
+                    "every_s": self.reflect_every_s, "reports": {book.asset: report},
+                }
+                self.event("reflection", report, book.asset)
+            except Exception as e:
+                message = f"FAILED — {type(e).__name__}: {e}"[:300]
+                self.reflection = {
+                    "ts": utcnow(), "mode": self.reflect_mode, "trigger": "trade_close",
+                    "every_s": self.reflect_every_s, "reports": {book.asset: message},
+                }
+                self.event("reflect_error", message, book.asset, "error")
+
+        task = asyncio.create_task(run_due())
+        self._reflection_tasks.add(task)
+        task.add_done_callback(self._reflection_tasks.discard)
+
     async def reflect_once(self, mode: str) -> None:
         goal = load_yaml(config.GOAL_FILE)  # re-read: the dashboard may have changed it
         reports = {}
         for book in list(self.books):  # one at a time, like the local task did
             try:
-                reports[book.asset] = await self._reflect_book(book, goal, mode)
+                reports[book.asset] = await self._reflect_book_guarded(book, goal, mode)
             except Exception as e:  # one asset's failure must not block the others
                 reports[book.asset] = f"FAILED — {type(e).__name__}: {e}"[:300]
                 self.event("reflect_error", f"{type(e).__name__}: {e}"[:300], book.asset, "error")
@@ -845,6 +938,9 @@ class Worker:
         names = ", ".join(book.asset for book in self.books)
         console.print(f"[bold]Booting hermes-trading worker[/] assets={names} mode=paper")
         settings = None if once else self._reflect_settings()
+        if settings:
+            self.reflect_mode = settings[0]
+            self.reflect_every_s = settings[1]
         reflector = asyncio.create_task(self.reflect_forever(*settings)) if settings else None
         try:
             while True:
@@ -863,5 +959,7 @@ class Worker:
         finally:
             if reflector:
                 reflector.cancel()
+            for task in list(self._reflection_tasks):
+                task.cancel()
             await price.close()
             await alpaca.close()

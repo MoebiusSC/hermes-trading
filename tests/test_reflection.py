@@ -52,8 +52,12 @@ class ReflectionGateTests(unittest.TestCase):
     def test_too_few_out_of_sample_trades_is_rejected(self):
         p = self.run_with(fake_result(30, reflect.MIN_OOS_TRADES - 1, 0.9, 0.9))
         self.assertTrue(p.rejected)
+        self.assertFalse(p.consumes_cadence)
         self.assertEqual(p.backtest["reason"], "insufficient_oos_trades")
         self.assertIn("fewer than", reflect.apply_proposal(p, "fallback"))
+        trades = reflect.read_jsonl(self.paths.trades)
+        hypotheses = reflect.read_jsonl(self.paths.hypotheses)
+        self.assertEqual(reflect.new_trades_since_last_reflection(trades, hypotheses), len(trades))
 
     def test_better_candidate_with_enough_trades_is_accepted(self):
         p = self.run_with(fake_result(30, reflect.MIN_OOS_TRADES, 0.2, 0.3))
@@ -63,6 +67,36 @@ class ReflectionGateTests(unittest.TestCase):
     def test_worse_out_of_sample_is_rejected(self):
         p = self.run_with(fake_result(30, 12, 0.05, 0.3))
         self.assertTrue(p.rejected)
+
+    def test_backtest_outage_never_applies_and_keeps_evidence(self):
+        with mock.patch.object(backtest, "run", side_effect=RuntimeError("history offline")):
+            p = reflect.propose("BTC/USDT", GOAL, "fallback", force=False)
+        self.assertTrue(p.rejected)
+        self.assertFalse(p.consumes_cadence)
+        self.assertEqual(p.backtest["verdict"], "unavailable")
+        before = reflect.load_yaml(self.paths.strategy)
+        self.assertIn("unavailable", reflect.apply_proposal(p, "fallback"))
+        self.assertEqual(reflect.load_yaml(self.paths.strategy), before)
+        self.assertEqual(
+            reflect.new_trades_since_last_reflection(
+                reflect.read_jsonl(self.paths.trades), reflect.read_jsonl(self.paths.hypotheses)
+            ),
+            6,
+        )
+
+    def test_valid_no_change_consumes_the_trade_block(self):
+        baseline = fake_result(30, 10, 0.10, 0.10)
+        with mock.patch.object(backtest, "run", return_value=baseline), \
+             mock.patch.object(reflect, "fallback_hypothesis", return_value=None):
+            p = reflect.propose("BTC/USDT", GOAL, "fallback", force=False)
+        self.assertEqual(p.mode, "observe")
+        reflect.apply_proposal(p, "fallback")
+        self.assertEqual(
+            reflect.new_trades_since_last_reflection(
+                reflect.read_jsonl(self.paths.trades), reflect.read_jsonl(self.paths.hypotheses)
+            ),
+            0,
+        )
 
     def test_recently_tried_value_is_not_tested_again(self):
         first = self.run_with(fake_result(30, 12, 0.05, 0.3))
@@ -74,6 +108,7 @@ class ReflectionGateTests(unittest.TestCase):
                                     "pnl": -5.0, "pnl_pct": -0.0005}) + "\n")
         again = self.run_with(fake_result(30, 12, 0.9, 0.9))
         self.assertTrue(again.rejected)
+        self.assertFalse(again.consumes_cadence)
         self.assertEqual(again.backtest["reason"], "duplicate")
 
 

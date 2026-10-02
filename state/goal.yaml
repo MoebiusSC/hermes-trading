@@ -51,6 +51,9 @@ risk:                        # portfolio limits checked before every automatic e
   max_open_positions: 31     # always-in-market strategies: one position per pair and sleeve, plus ETFs
   max_open_crypto: 24        # 12 pairs x (trend + momentum sleeve)
   max_exposure_pct: 60       # invested value / total capital (24 accounts at 30% ~ 30%)
+  loss_streak_pause: 4       # after 4 consecutive losses, pause new entries for this asset temporarily
+  asset_drawdown_pause: 0.08 # same 8% failure threshold: exits continue, only new entries pause
+  asset_pause_minutes: 60    # automatic cooldown; avoids permanently deadlocking an asset
 strategy_defaults:           # applied once at boot to strategies that predate them (recorded as "migration")
   exit_rsi: 75               # the first key marks a strategy as migrated
   entry.timeframe: "15m"
